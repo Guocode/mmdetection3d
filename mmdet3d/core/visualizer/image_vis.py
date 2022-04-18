@@ -197,10 +197,28 @@ def draw_camera_bbox3d_on_img(bboxes3d,
     assert (cam2img.shape == torch.Size([3, 3])
             or cam2img.shape == torch.Size([4, 4]))
     cam2img = cam2img.float().cpu()
-
+    cam2img[:, -1] = 0
     # project to 2d to get image coords (uv)
     uv_origin = points_cam2img(points_3d, cam2img)
     uv_origin = (uv_origin - 1).round()
     imgfov_pts_2d = uv_origin[..., :2].reshape(num_bbox, 8, 2).numpy()
+    line_indices = ((0, 1), (0, 3), (0, 4), (1, 2), (1, 5), (3, 2), (3, 7),
+                    (4, 5), (4, 7), (2, 6), (5, 6), (6, 7))
+    for i in range(num_bbox):
+        corner_3d = corners_3d[i]#.astype(np.int)
+        for start, end in line_indices:
+            if corner_3d[start,2]<=0 and corner_3d[end,2]<=0:
+                continue
 
-    return plot_rect3d_on_img(img, num_bbox, imgfov_pts_2d, color, thickness)
+            start_corner_3d = make_virtual_point(corner_3d[start],corner_3d[end]) if corner_3d[start,2]<=0 else corner_3d[start]
+            end_corner_3d = make_virtual_point(corner_3d[start],corner_3d[end]) if corner_3d[end,2]<=0 else corner_3d[end]
+            start_corner_2d = points_cam2img(start_corner_3d, cam2img).int().tolist()
+            end_corner_2d = points_cam2img(end_corner_3d, cam2img).int().tolist()
+            cv2.line(img, start_corner_2d,
+                     end_corner_2d, color, thickness,
+                     cv2.LINE_AA)
+
+    return img#plot_rect3d_on_img(img, num_bbox, imgfov_pts_2d, color, thickness)
+
+def make_virtual_point(p1,p2,z=0.01):
+    return (z - p2[2]) / (p1[2] - p2[2]) * p1 + (p1[2]-z) / (p1[2] - p2[2]) * p2

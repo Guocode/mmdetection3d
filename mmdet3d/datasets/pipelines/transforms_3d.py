@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from mmcv import is_tuple_of
 from mmcv.utils import build_from_cfg
-
+import mmcv
 from mmdet3d.core import VoxelGenerator
 from mmdet3d.core.bbox import (CameraInstance3DBoxes, DepthInstance3DBoxes,
                                LiDARInstance3DBoxes, box_np_ops)
@@ -1631,6 +1631,87 @@ class AffineResize(object):
         repr_str += f'down_ratio={self.down_ratio}) '
         return repr_str
 
+@PIPELINES.register_module()
+class PadBorders(object):
+    """Pad the image & mask.
+
+    There are two padding modes: (1) pad to a fixed size and (2) pad to the
+    minimum size that is divisible by some number.
+    Added keys are "pad_shape", "pad_fixed_size", "pad_size_divisor",
+
+    Args:
+        size (tuple, optional): Fixed padding size.
+        size_divisor (int, optional): The divisor of padded size.
+        pad_val (float, optional): Padding value, 0 by default.
+    """
+
+    def __init__(self, size=None, size_divisor=None, pad_val=0):
+        self.size = size
+        self.size_divisor = size_divisor
+        self.pad_val = pad_val
+        # only one of size and size_divisor should be valid
+        assert size is not None or size_divisor is not None
+        assert size is None or size_divisor is None
+
+    def _pad_img(self, results):
+        """Pad images according to ``self.size``."""
+        for key in results.get('img_fields', ['img']):
+            if self.size is not None:
+                h,w,_ = results[key].shape
+                pad_l = (self.size[0]-w)//2
+                pad_t = (self.size[1]-h)//2
+                pad_r = self.size[0]-w-pad_l
+                pad_b = self.size[1]-h-pad_t
+                padded_img = mmcv.impad(
+                    results[key], padding=(pad_l,pad_t,pad_r,pad_b), pad_val=self.pad_val)
+            elif self.size_divisor is not None:
+                padded_img = mmcv.impad_to_multiple(
+                    results[key], self.size_divisor, pad_val=self.pad_val)
+            results[key] = padded_img
+        results['kpts2d'][:,:,:]+=(pad_l,pad_t)
+        results['centers2d'][:,:]+=(pad_l,pad_t)
+        results['gt_bboxes'][:,:]+=(pad_l,pad_t,pad_l,pad_t)
+        results['cam2img'][0][2]+=pad_l
+        results['cam2img'][1][2]+=pad_t
+
+        results['pad_shape'] = padded_img.shape
+        results['pad_fixed_size'] = self.size
+        results['pad_size_divisor'] = self.size_divisor
+
+    def _pad_masks(self, results):
+        """Pad masks according to ``results['pad_shape']``."""
+        pad_shape = results['pad_shape'][:2]
+        for key in results.get('mask_fields', []):
+            results[key] = results[key].pad(pad_shape, pad_val=self.pad_val)
+
+    def _pad_seg(self, results):
+        """Pad semantic segmentation map according to
+        ``results['pad_shape']``."""
+        for key in results.get('seg_fields', []):
+            results[key] = mmcv.impad(
+                results[key], shape=results['pad_shape'][:2])
+
+    def __call__(self, results):
+        """Call function to pad images, masks, semantic segmentation maps.
+
+        Args:
+            results (dict): Result dict from loading pipeline.
+
+        Returns:
+            dict: Updated result dict.
+        """
+        self._pad_img(results)
+        self._pad_masks(results)
+        self._pad_seg(results)
+        return results
+
+    def __repr__(self):
+        repr_str = self.__class__.__name__
+        repr_str += f'(size={self.size}, '
+        repr_str += f'size_divisor={self.size_divisor}, '
+        repr_str += f'pad_val={self.pad_val})'
+        return repr_str
+
 
 @PIPELINES.register_module()
 class RandomShiftScale(object):
@@ -1688,4 +1769,105 @@ class RandomShiftScale(object):
         repr_str = self.__class__.__name__
         repr_str += f'(shift_scale={self.shift_scale}, '
         repr_str += f'aug_prob={self.aug_prob}) '
+        return repr_str
+
+@PIPELINES.register_module()
+class CentralizeShift(object):
+    """Random shift scale.
+
+    Different from the normal shift and scale function, it doesn't
+    directly shift or scale image. It can record the shift and scale
+    infos into loading pipelines. It's designed to be used with
+    AffineResize together.
+
+    Args:
+        shift_scale (tuple[float]): Shift and scale range.
+        aug_prob (float): The shifting and scaling probability.
+    """
+
+    def __init__(self, shift_scale, aug_prob):
+
+        self.shift_scale = shift_scale
+        self.aug_prob = aug_prob
+
+    def __call__(self, results):
+        """Call function to record random shift and scale infos.
+
+        Args:
+            results (dict): Result dict from loading pipeline.
+
+        Returns:
+            dict: Results after random shift and scale, 'center', 'size'
+                and 'affine_aug' keys are added in the result dict.
+        """
+        img = results['img']
+
+        height, width = img.shape[:2]
+
+        center = np.array([width / 2, height / 2], dtype=np.float32)
+        size = np.array([width, height], dtype=np.float32)
+
+        if random.random() < self.aug_prob:
+            shift, scale = self.shift_scale[0], self.shift_scale[1]
+            shift_ranges = np.arange(-shift, shift + 0.1, 0.1)
+            center[0] += size[0] * random.choice(shift_ranges)
+            center[1] += size[1] * random.choice(shift_ranges)
+            scale_ranges = np.arange(1 - scale, 1 + scale + 0.1, 0.1)
+            size *= random.choice(scale_ranges)
+            results['affine_aug'] = True
+        else:
+            results['affine_aug'] = False
+
+        results['center'] = center
+        results['size'] = size
+
+        return results
+
+    def __repr__(self):
+        repr_str = self.__class__.__name__
+        repr_str += f'(shift_scale={self.shift_scale}, '
+        repr_str += f'aug_prob={self.aug_prob}) '
+        return repr_str
+
+@PIPELINES.register_module()
+class NormIntrinsicByResize(object):
+    """Random shift scale.
+
+    Different from the normal shift and scale function, it doesn't
+    directly shift or scale image. It can record the shift and scale
+    infos into loading pipelines. It's designed to be used with
+    AffineResize together.
+
+    Args:
+        shift_scale (tuple[float]): Shift and scale range.
+        aug_prob (float): The shifting and scaling probability.
+    """
+
+    def __init__(self, intrinsic):
+
+        self.intrinsic = intrinsic
+
+    def __call__(self, results):
+        """Call function to record random shift and scale infos.
+
+        Args:
+            results (dict): Result dict from loading pipeline.
+
+        Returns:
+            dict: Results after random shift and scale, 'center', 'size'
+                and 'affine_aug' keys are added in the result dict.
+        """
+        img = results['img']
+
+        height, width = img.shape[:2]
+
+        center = np.array([width / 2, height / 2], dtype=np.float32)
+        size = np.array([width, height], dtype=np.float32)
+
+
+        return results
+
+    def __repr__(self):
+        repr_str = self.__class__.__name__
+        repr_str += f'(intrinsic={self.intrinsic} '
         return repr_str

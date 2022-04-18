@@ -4,6 +4,7 @@ import warnings
 from os import path as osp
 from pathlib import Path
 
+import cv2
 import mmcv
 import numpy as np
 from mmcv import Config, DictAction, mkdir_or_exist
@@ -136,19 +137,30 @@ def show_seg_data(input, out_dir, show=False):
 
 def show_proj_bbox_img(input, out_dir, show=False, is_nus_mono=False):
     """Visualize 3D bboxes on 2D image by projection."""
-    gt_bboxes = input['gt_bboxes_3d']._data
+    gt_bboxes_3d = input['gt_bboxes_3d']._data
+    gt_bboxes_2d = input['gt_bboxes']._data.numpy().astype(np.int32)
+    kpts2d = input['kpts2d']._data.numpy().astype(np.int32)
+    centers2d = input['centers2d']._data.numpy().astype(np.int32)
     img_metas = input['img_metas']._data
     img = input['img']._data.numpy()
     # need to transpose channel to first dim
     img = img.transpose(1, 2, 0)
     # no 3D gt bboxes, just show img
-    if gt_bboxes.tensor.shape[0] == 0:
-        gt_bboxes = None
+    if gt_bboxes_3d.tensor.shape[0] == 0:
+        gt_bboxes_3d = None
     filename = Path(img_metas['filename']).name
-    if isinstance(gt_bboxes, DepthInstance3DBoxes):
+    img = img.copy()
+    for gt_bbox_2d in gt_bboxes_2d:
+        cv2.rectangle(img,gt_bbox_2d[:2],gt_bbox_2d[2:],(0,255,0),2)
+    for kpt2d in kpts2d:
+        for cid,_kpt2d in enumerate(kpt2d):
+            cv2.circle(img,_kpt2d[:2],3,(0,0,255))
+    for center2d in centers2d:
+        cv2.circle(img, center2d[:2], 5, (255, 0, 255))
+    if isinstance(gt_bboxes_3d, DepthInstance3DBoxes):
         show_multi_modality_result(
             img,
-            gt_bboxes,
+            gt_bboxes_3d,
             None,
             None,
             out_dir,
@@ -156,10 +168,10 @@ def show_proj_bbox_img(input, out_dir, show=False, is_nus_mono=False):
             box_mode='depth',
             img_metas=img_metas,
             show=show)
-    elif isinstance(gt_bboxes, LiDARInstance3DBoxes):
+    elif isinstance(gt_bboxes_3d, LiDARInstance3DBoxes):
         show_multi_modality_result(
             img,
-            gt_bboxes,
+            gt_bboxes_3d,
             None,
             img_metas['lidar2img'],
             out_dir,
@@ -167,10 +179,10 @@ def show_proj_bbox_img(input, out_dir, show=False, is_nus_mono=False):
             box_mode='lidar',
             img_metas=img_metas,
             show=show)
-    elif isinstance(gt_bboxes, CameraInstance3DBoxes):
+    elif isinstance(gt_bboxes_3d, CameraInstance3DBoxes):
         show_multi_modality_result(
             img,
-            gt_bboxes,
+            gt_bboxes_3d,
             None,
             img_metas['cam2img'],
             out_dir,
@@ -181,7 +193,7 @@ def show_proj_bbox_img(input, out_dir, show=False, is_nus_mono=False):
     else:
         # can't project, just show img
         warnings.warn(
-            f'unrecognized gt box type {type(gt_bboxes)}, only show image')
+            f'unrecognized gt box type {type(gt_bboxes_3d)}, only show image')
         show_multi_modality_result(
             img, None, None, None, out_dir, filename, show=show)
 
@@ -205,7 +217,10 @@ def main():
     vis_task = args.task  # 'det', 'seg', 'multi_modality-det', 'mono-det'
     progress_bar = mmcv.ProgressBar(len(dataset))
 
-    for input in dataset:
+    for iid,input in enumerate(dataset):
+        # if iid!=30:
+        #     continue
+        print(input['img_metas'].data['filename'])
         if vis_task in ['det', 'multi_modality-det']:
             # show 3D bboxes on 3D point clouds
             show_det_data(input, args.output_dir, show=args.online)

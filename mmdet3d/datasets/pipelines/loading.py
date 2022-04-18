@@ -534,7 +534,6 @@ class LoadAnnotations3D(LoadAnnotations):
         self.with_mask_3d = with_mask_3d
         self.with_seg_3d = with_seg_3d
         self.seg_3d_dtype = seg_3d_dtype
-
     def _load_bboxes_3d(self, results):
         """Private function to load 3D bounding box annotations.
 
@@ -559,6 +558,8 @@ class LoadAnnotations3D(LoadAnnotations):
         """
         results['centers2d'] = results['ann_info']['centers2d']
         results['depths'] = results['ann_info']['depths']
+        results['kpts2d'] = results['ann_info']['kpts2d']
+        results['kpts2d_valid'] = results['ann_info']['kpts2d_valid']
         return results
 
     def _load_labels_3d(self, results):

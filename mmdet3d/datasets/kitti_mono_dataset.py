@@ -69,6 +69,8 @@ class KittiMonoDataset(NuScenesMonoDataset):
         gt_bboxes_cam3d = []
         centers2d = []
         depths = []
+        kpts2d = []
+        kpts2d_valid = []
         for i, ann in enumerate(ann_info):
             if ann.get('ignore', False):
                 continue
@@ -96,7 +98,8 @@ class KittiMonoDataset(NuScenesMonoDataset):
                 depth = ann['center2d'][2]
                 centers2d.append(center2d)
                 depths.append(depth)
-
+                kpts2d.append(ann['kpt2d'])
+                kpts2d_valid.append(ann['kpt2d_valid'])
         if gt_bboxes:
             gt_bboxes = np.array(gt_bboxes, dtype=np.float32)
             gt_labels = np.array(gt_labels, dtype=np.int64)
@@ -108,11 +111,15 @@ class KittiMonoDataset(NuScenesMonoDataset):
             gt_bboxes_cam3d = np.array(gt_bboxes_cam3d, dtype=np.float32)
             centers2d = np.array(centers2d, dtype=np.float32)
             depths = np.array(depths, dtype=np.float32)
+            kpts2d = np.asarray(kpts2d,dtype=np.float32)
+            kpts2d_valid = np.asarray(kpts2d_valid,dtype=np.int32)
         else:
             gt_bboxes_cam3d = np.zeros((0, self.bbox_code_size),
                                        dtype=np.float32)
             centers2d = np.zeros((0, 2), dtype=np.float32)
             depths = np.zeros((0), dtype=np.float32)
+            kpts2d = np.zeros((0,8,2), dtype=np.float32)
+            kpts2d_valid = np.zeros((0,8),dtype=np.int32)
 
         gt_bboxes_cam3d = CameraInstance3DBoxes(
             gt_bboxes_cam3d,
@@ -126,7 +133,6 @@ class KittiMonoDataset(NuScenesMonoDataset):
             gt_bboxes_ignore = np.zeros((0, 4), dtype=np.float32)
 
         seg_map = img_info['filename'].replace('jpg', 'png')
-
         ann = dict(
             bboxes=gt_bboxes,
             labels=gt_labels,
@@ -136,7 +142,10 @@ class KittiMonoDataset(NuScenesMonoDataset):
             depths=depths,
             bboxes_ignore=gt_bboxes_ignore,
             masks=gt_masks_ann,
-            seg_map=seg_map)
+            seg_map=seg_map,
+            kpts2d=kpts2d,
+            kpts2d_valid=kpts2d_valid
+        )
 
         return ann
 

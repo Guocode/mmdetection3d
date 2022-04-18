@@ -6,6 +6,7 @@ import mmcv
 import numpy as np
 from nuscenes.utils.geometry_utils import view_points
 
+from mmdet3d.core import CameraInstance3DBoxes
 from mmdet3d.core.bbox import box_np_ops, points_cam2img
 from .kitti_data_utils import WaymoInfoGatherer, get_kitti_image_info
 from .nuscenes_converter import post_process_coords
@@ -426,7 +427,9 @@ def export_2d_annotation(root_path, info_path, mono3d=True):
     coco_ann_id = 0
     coco_2d_dict = dict(annotations=[], images=[], categories=cat2Ids)
     from os import path as osp
-    for info in mmcv.track_iter_progress(kitti_infos):
+    for infoid, info in enumerate(mmcv.track_iter_progress(kitti_infos)):
+        # if infoid>100:
+        #     break
         coco_infos = get_2d_boxes(info, occluded=[0, 1, 2, 3], mono3d=mono3d)
         (height, width,
          _) = mmcv.imread(osp.join(root_path,
@@ -506,12 +509,23 @@ def get_2d_boxes(info, occluded, mono3d=True):
         dst = np.array([0.5, 0.5, 0.5])
         src = np.array([0.5, 1.0, 0.5])
         loc = loc + dim * (dst - src)
-        offset = (info['calib']['P2'][0, 3] - info['calib']['P0'][0, 3]) \
-            / info['calib']['P2'][0, 0]
+        offset_x = (info['calib']['P2'][0, 3] - info['calib']['P0'][0, 3]) \
+                   / info['calib']['P2'][0, 0]
+        offset_y = (info['calib']['P2'][1, 3] - info['calib']['P0'][1, 3]) \
+                   / info['calib']['P2'][1, 1]
+        offset_z = (info['calib']['P2'][2, 3] - info['calib']['P0'][2, 3]) \
+                   / info['calib']['P2'][2, 2]
         loc_3d = np.copy(loc)
-        loc_3d[0, 0] += offset
+        loc_3d[0, 0] += offset_x
+        loc_3d[0, 1] += offset_y
+        loc_3d[0, 2] += offset_z
+        # dim[0,0] = dim[0,0]*5
         gt_bbox_3d = np.concatenate([loc, dim, rot], axis=1).astype(np.float32)
-
+        # cambbox = CameraInstance3DBoxes(
+        #     gt_bbox_3d,
+        #     box_dim=gt_bbox_3d.shape[-1],
+        #     origin=(0.5, 0.5, 0.5))
+        # cicorners = cambbox.corners
         # Filter out the corners that are not in front of the calibrated
         # sensor.
         corners_3d = box_np_ops.center_to_corner_box3d(
@@ -520,16 +534,24 @@ def get_2d_boxes(info, occluded, mono3d=True):
             gt_bbox_3d[:, 6], [0.5, 0.5, 0.5],
             axis=1)
         corners_3d = corners_3d[0].T  # (1, 8, 3) -> (3, 8)
-        in_front = np.argwhere(corners_3d[2, :] > 0).flatten()
-        corners_3d = corners_3d[:, in_front]
+        kpt3d = np.concatenate([loc.T, corners_3d], axis=-1)  # (3,9)
+        # in_front = np.argwhere(corners_3d[2, :] > 0).flatten()
+        # corners_3d = corners_3d[:, in_front]
 
         # Project 3d box to 2d.
         camera_intrinsic = P2
-        corner_coords = view_points(corners_3d, camera_intrinsic,
-                                    True).T[:, :2].tolist()
+        # deal with negtive depth
+        corners_3d_clipped = negcorner_vp(corners_3d.T).T
+        corner_coords_clipped = view_points(corners_3d_clipped, camera_intrinsic,
+                                            True).T[:, :2]
+        kpt2d = view_points(kpt3d, camera_intrinsic, True).T
+        kpt2d_valid = -np.ones((9), dtype=np.int32)
+        kpt2d_valid += (kpt2d[:, 2] > 0).astype(np.int32) + np.all(kpt2d[:, :2] > 0, axis=1) * (
+                    (kpt2d[:, 0] < info['image']['image_shape'][1]) * (
+                        kpt2d[:, 1] < info['image']['image_shape'][0])).astype(np.int32)
 
         # Keep only corners that fall within the image.
-        final_coords = post_process_coords(corner_coords)
+        final_coords = post_process_coords(corner_coords_clipped.tolist(), info['image']['image_shape'][::-1].tolist())
 
         # Skip if the convex hull of the re-projected corners
         # does not intersect the image canvas.
@@ -542,9 +564,10 @@ def get_2d_boxes(info, occluded, mono3d=True):
         repro_rec = generate_record(ann_rec, min_x, min_y, max_x, max_y,
                                     sample_data_token,
                                     info['image']['image_path'])
-
         # If mono3d=True, add 3D annotations in camera coordinates
         if mono3d and (repro_rec is not None):
+            repro_rec['kpt2d'] = kpt2d[:, :2].tolist()
+            repro_rec['kpt2d_valid'] = kpt2d_valid.astype(np.int).tolist()
             repro_rec['bbox_cam3d'] = np.concatenate(
                 [loc_3d, dim, rot],
                 axis=1).astype(np.float32).squeeze().tolist()
@@ -622,3 +645,43 @@ def generate_record(ann_rec, x1, y1, x2, y2, sample_data_token, filename):
     coco_rec['iscrowd'] = 0
 
     return coco_rec
+
+
+def make_virtual_point(p1, p2, z=0.01):
+    '''
+
+    Args:
+        p1: x1,y1,z1
+        p2: x2,y2,z2
+        z: virual_point z
+
+    Returns:
+        p3: x3,y3,z
+    '''
+    assert p1[2] * p2[2] < 0
+    a = (z - p2[2]) / (p1[2] - p2[2])
+    p3 = a * p1 + (1 - a) * p2
+    return p3
+
+
+def negcorner_vp(corners_3d):
+    cornear = {
+        0: [1, 3, 4],
+        1: [0, 2, 5],
+        2: [1, 3, 6],
+        3: [0, 2, 7],
+        4: [0, 5, 7],
+        5: [1, 4, 6],
+        6: [2, 5, 7],
+        7: [3, 4, 6]
+    }
+    proc_corner_3d = []
+    for cid, corner_3d in enumerate(corners_3d):
+        if corner_3d[2] > 0:
+            proc_corner_3d.append(corner_3d)
+        else:
+            for nearid in cornear[cid]:
+                if corners_3d[nearid][2] > 0:  # 临接点为正深度
+                    virtual_point = make_virtual_point(corner_3d, corners_3d[nearid], z=0.01)
+                    proc_corner_3d.append(virtual_point)
+    return np.asarray(proc_corner_3d)

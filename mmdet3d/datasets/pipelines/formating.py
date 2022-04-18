@@ -53,7 +53,7 @@ class DefaultFormatBundle(object):
         for key in [
                 'proposals', 'gt_bboxes', 'gt_bboxes_ignore', 'gt_labels',
                 'gt_labels_3d', 'attr_labels', 'pts_instance_mask',
-                'pts_semantic_mask', 'centers2d', 'depths'
+                'pts_semantic_mask', 'centers2d', 'depths','kpts2d','kpts2d_valid'
         ]:
             if key not in results:
                 continue
@@ -228,6 +228,10 @@ class DefaultFormatBundle3D(DefaultFormatBundle):
                         gt_bboxes_3d_mask]
                 if 'depths' in results:
                     results['depths'] = results['depths'][gt_bboxes_3d_mask]
+                if 'kpts2d' in results:
+                    results['kpts2d'] = results['kpts2d'][gt_bboxes_3d_mask]
+                if 'kpts2d_valid' in results:
+                    results['kpts2d_valid'] = results['kpts2d_valid'][gt_bboxes_3d_mask]
             if 'gt_bboxes_mask' in results:
                 gt_bboxes_mask = results['gt_bboxes_mask']
                 if 'gt_bboxes' in results:
