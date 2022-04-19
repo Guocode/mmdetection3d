@@ -1772,24 +1772,12 @@ class RandomShiftScale(object):
         return repr_str
 
 @PIPELINES.register_module()
-class CentralizeShift(object):
-    """Random shift scale.
+class NormIntrinsicByResizeShift(object):
 
-    Different from the normal shift and scale function, it doesn't
-    directly shift or scale image. It can record the shift and scale
-    infos into loading pipelines. It's designed to be used with
-    AffineResize together.
-
-    Args:
-        shift_scale (tuple[float]): Shift and scale range.
-        aug_prob (float): The shifting and scaling probability.
-    """
-
-    def __init__(self, shift_scale, aug_prob):
-
-        self.shift_scale = shift_scale
-        self.aug_prob = aug_prob
-
+    def __init__(self, focal_length=None,norm_principal_point_offset=False,dst_size=None):
+        self.focal_length = focal_length
+        self.norm_principal_point_offset = norm_principal_point_offset
+        self.dst_size = dst_size
     def __call__(self, results):
         """Call function to record random shift and scale infos.
 
@@ -1803,68 +1791,39 @@ class CentralizeShift(object):
         img = results['img']
 
         height, width = img.shape[:2]
-
-        center = np.array([width / 2, height / 2], dtype=np.float32)
-        size = np.array([width, height], dtype=np.float32)
-
-        if random.random() < self.aug_prob:
-            shift, scale = self.shift_scale[0], self.shift_scale[1]
-            shift_ranges = np.arange(-shift, shift + 0.1, 0.1)
-            center[0] += size[0] * random.choice(shift_ranges)
-            center[1] += size[1] * random.choice(shift_ranges)
-            scale_ranges = np.arange(1 - scale, 1 + scale + 0.1, 0.1)
-            size *= random.choice(scale_ranges)
-            results['affine_aug'] = True
+        scale = self.focal_length/results['cam2img'][0][0]
+        mpoffset = (results['cam2img'][0][2],results['cam2img'][1][2])
+        new_height, new_width = int(height*scale), int(width*scale)
+        new_scale = new_width/width
+        if self.dst_size:
+            dst_width,dst_height = self.dst_size
         else:
-            results['affine_aug'] = False
-
-        results['center'] = center
-        results['size'] = size
-
-        return results
-
-    def __repr__(self):
-        repr_str = self.__class__.__name__
-        repr_str += f'(shift_scale={self.shift_scale}, '
-        repr_str += f'aug_prob={self.aug_prob}) '
-        return repr_str
-
-@PIPELINES.register_module()
-class NormIntrinsicByResize(object):
-    """Random shift scale.
-
-    Different from the normal shift and scale function, it doesn't
-    directly shift or scale image. It can record the shift and scale
-    infos into loading pipelines. It's designed to be used with
-    AffineResize together.
-
-    Args:
-        shift_scale (tuple[float]): Shift and scale range.
-        aug_prob (float): The shifting and scaling probability.
-    """
-
-    def __init__(self, intrinsic):
-
-        self.intrinsic = intrinsic
-
-    def __call__(self, results):
-        """Call function to record random shift and scale infos.
-
-        Args:
-            results (dict): Result dict from loading pipeline.
-
-        Returns:
-            dict: Results after random shift and scale, 'center', 'size'
-                and 'affine_aug' keys are added in the result dict.
-        """
-        img = results['img']
-
-        height, width = img.shape[:2]
-
-        center = np.array([width / 2, height / 2], dtype=np.float32)
-        size = np.array([width, height], dtype=np.float32)
-
-
+            dst_width,dst_height = new_width,new_height
+        # center = np.array([width / 2, height / 2], dtype=np.float32)
+        # size = np.array([width, height], dtype=np.float32)
+        get_matrix = np.zeros((2,3),dtype=np.float32)
+        get_matrix[0,0] = new_scale
+        get_matrix[1,1] = new_scale
+        if self.norm_principal_point_offset:
+            get_matrix[0,2] = dst_width/2-mpoffset[0]*new_scale
+            get_matrix[1,2] = dst_height/2-mpoffset[1]*new_scale
+        img = cv2.warpAffine(img, get_matrix, (dst_width,dst_height))
+        results['img'] = img
+        results['gt_bboxes']*=new_scale
+        results['gt_bboxes'][:,:2]+=get_matrix[:,2]
+        results['gt_bboxes'][:,2:]+=get_matrix[:,2]
+        results['centers2d']*=new_scale
+        results['centers2d']+=get_matrix[:,2]
+        results['kpts2d']*=new_scale
+        results['kpts2d']+=get_matrix[:,2]
+        results['img_shape']=(dst_height,dst_width)
+        results['cam2img'][0][0]*=new_scale
+        results['cam2img'][0][2]*=new_scale
+        results['cam2img'][0][2]+=get_matrix[0,2]
+        results['cam2img'][1][1]*=new_scale
+        results['cam2img'][1][2]*=new_scale
+        results['cam2img'][1][2]+=get_matrix[1,2]
+        #TODO 重新判断ptsvalid
         return results
 
     def __repr__(self):

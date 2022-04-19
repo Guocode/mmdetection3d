@@ -143,6 +143,7 @@ def show_proj_bbox_img(input, out_dir, show=False, is_nus_mono=False):
     centers2d = input['centers2d']._data.numpy().astype(np.int32)
     img_metas = input['img_metas']._data
     img = input['img']._data.numpy()
+    print(img.shape)
     # need to transpose channel to first dim
     img = img.transpose(1, 2, 0)
     # no 3D gt bboxes, just show img
