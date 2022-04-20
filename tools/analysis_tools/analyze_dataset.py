@@ -113,7 +113,7 @@ def main():
     fig = plt.figure()  # 创建画布
     ax = fig.subplots()  # 创建图表
     ax.hist(principal_point_offset_ana[:,0], ec='w', lw=1, color="C1")  # 设置分组数，设置edgecolor和linewidth
-    plt.savefig(os.path.join(args.output_dir, 'principal_point_offset_ana.png'))
+    plt.savefig(os.path.join(args.output_dir, 'principal_point_offset_dist.png'))
 
     return
 

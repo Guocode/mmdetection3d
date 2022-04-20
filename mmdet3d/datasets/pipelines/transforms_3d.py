@@ -46,7 +46,7 @@ class RandomDropPointsColor(object):
         """
         points = input_dict['points']
         assert points.attribute_dims is not None and \
-            'color' in points.attribute_dims, \
+               'color' in points.attribute_dims, \
             'Expect points have color attribute'
 
         # this if-expression is a bit strange
@@ -1079,7 +1079,7 @@ class IndoorPatchPointSample(object):
             attribute_dims.update(
                 dict(normalized_coord=[
                     attributes.shape[1], attributes.shape[1] +
-                    1, attributes.shape[1] + 2
+                                         1, attributes.shape[1] + 2
                 ]))
 
         points = np.concatenate([centered_coords, attributes], axis=1)
@@ -1162,7 +1162,7 @@ class IndoorPatchPointSample(object):
                 flag2 = True
             else:
                 flag2 = np.sum(cur_sem_mask != self.ignore_index) / \
-                               len(cur_sem_mask) >= 0.7
+                        len(cur_sem_mask) >= 0.7
 
             if flag1 and flag2:
                 break
@@ -1240,7 +1240,7 @@ class BackgroundPointsFilter(object):
     def __init__(self, bbox_enlarge_range):
         assert (is_tuple_of(bbox_enlarge_range, float)
                 and len(bbox_enlarge_range) == 3) \
-            or isinstance(bbox_enlarge_range, float), \
+               or isinstance(bbox_enlarge_range, float), \
             f'Invalid arguments bbox_enlarge_range {bbox_enlarge_range}'
 
         if isinstance(bbox_enlarge_range, float):
@@ -1313,7 +1313,7 @@ class VoxelBasedPointSampler(object):
         self.time_dim = time_dim
         if prev_sweep_cfg is not None:
             assert prev_sweep_cfg['max_num_points'] == \
-                cur_sweep_cfg['max_num_points']
+                   cur_sweep_cfg['max_num_points']
             self.prev_voxel_generator = VoxelGenerator(**prev_sweep_cfg)
             self.prev_voxel_num = self.prev_voxel_generator._max_voxels
         else:
@@ -1338,7 +1338,7 @@ class VoxelBasedPointSampler(object):
                 sampler._max_voxels - voxels.shape[0], sampler._max_num_points,
                 point_dim
             ],
-                                      dtype=points.dtype)
+                dtype=points.dtype)
             padding_points[:] = voxels[0]
             sample_points = np.concatenate([voxels, padding_points], axis=0)
         else:
@@ -1513,7 +1513,7 @@ class AffineResize(object):
             valid_index = (centers2d[:, 0] >
                            0) & (centers2d[:, 0] <
                                  self.img_scale[0]) & (centers2d[:, 1] > 0) & (
-                                     centers2d[:, 1] < self.img_scale[1])
+                                  centers2d[:, 1] < self.img_scale[1])
             results['centers2d'] = centers2d[valid_index]
 
             for key in results.get('bbox_fields', []):
@@ -1553,11 +1553,11 @@ class AffineResize(object):
             bboxes[:, 2:] = self._affine_transform(bboxes[:, 2:], matrix)
             if self.bbox_clip_border:
                 bboxes[:,
-                       [0, 2]] = bboxes[:,
-                                        [0, 2]].clip(0, self.img_scale[0] - 1)
+                [0, 2]] = bboxes[:,
+                          [0, 2]].clip(0, self.img_scale[0] - 1)
                 bboxes[:,
-                       [1, 3]] = bboxes[:,
-                                        [1, 3]].clip(0, self.img_scale[1] - 1)
+                [1, 3]] = bboxes[:,
+                          [1, 3]].clip(0, self.img_scale[1] - 1)
             results[key] = bboxes
 
     def _affine_transform(self, points, matrix):
@@ -1631,6 +1631,7 @@ class AffineResize(object):
         repr_str += f'down_ratio={self.down_ratio}) '
         return repr_str
 
+
 @PIPELINES.register_module()
 class PadBorders(object):
     """Pad the image & mask.
@@ -1657,22 +1658,22 @@ class PadBorders(object):
         """Pad images according to ``self.size``."""
         for key in results.get('img_fields', ['img']):
             if self.size is not None:
-                h,w,_ = results[key].shape
-                pad_l = (self.size[0]-w)//2
-                pad_t = (self.size[1]-h)//2
-                pad_r = self.size[0]-w-pad_l
-                pad_b = self.size[1]-h-pad_t
+                h, w, _ = results[key].shape
+                pad_l = (self.size[0] - w) // 2
+                pad_t = (self.size[1] - h) // 2
+                pad_r = self.size[0] - w - pad_l
+                pad_b = self.size[1] - h - pad_t
                 padded_img = mmcv.impad(
-                    results[key], padding=(pad_l,pad_t,pad_r,pad_b), pad_val=self.pad_val)
+                    results[key], padding=(pad_l, pad_t, pad_r, pad_b), pad_val=self.pad_val)
             elif self.size_divisor is not None:
                 padded_img = mmcv.impad_to_multiple(
                     results[key], self.size_divisor, pad_val=self.pad_val)
             results[key] = padded_img
-        results['kpts2d'][:,:,:]+=(pad_l,pad_t)
-        results['centers2d'][:,:]+=(pad_l,pad_t)
-        results['gt_bboxes'][:,:]+=(pad_l,pad_t,pad_l,pad_t)
-        results['cam2img'][0][2]+=pad_l
-        results['cam2img'][1][2]+=pad_t
+        results['kpts2d'][:, :, :] += (pad_l, pad_t)
+        results['centers2d'][:, :] += (pad_l, pad_t)
+        results['gt_bboxes'][:, :] += (pad_l, pad_t, pad_l, pad_t)
+        results['cam2img'][0][2] += pad_l
+        results['cam2img'][1][2] += pad_t
 
         results['pad_shape'] = padded_img.shape
         results['pad_fixed_size'] = self.size
@@ -1771,13 +1772,15 @@ class RandomShiftScale(object):
         repr_str += f'aug_prob={self.aug_prob}) '
         return repr_str
 
+
 @PIPELINES.register_module()
 class NormIntrinsicByResizeShift(object):
 
-    def __init__(self, focal_length=None,norm_principal_point_offset=False,dst_size=None):
+    def __init__(self, focal_length=None, norm_principal_point_offset=False, dst_size=None):
         self.focal_length = focal_length
         self.norm_principal_point_offset = norm_principal_point_offset
         self.dst_size = dst_size
+
     def __call__(self, results):
         """Call function to record random shift and scale infos.
 
@@ -1791,39 +1794,41 @@ class NormIntrinsicByResizeShift(object):
         img = results['img']
 
         height, width = img.shape[:2]
-        scale = self.focal_length/results['cam2img'][0][0]
-        mpoffset = (results['cam2img'][0][2],results['cam2img'][1][2])
-        new_height, new_width = int(height*scale), int(width*scale)
-        new_scale = new_width/width
+        scale = self.focal_length / results['cam2img'][0][0]
+        mpoffset = (results['cam2img'][0][2], results['cam2img'][1][2])
+        new_height, new_width = int(height * scale), int(width * scale)
+        new_scale = new_width / width
         if self.dst_size:
-            dst_width,dst_height = self.dst_size
+            dst_width, dst_height = self.dst_size
         else:
-            dst_width,dst_height = new_width,new_height
+            dst_width, dst_height = new_width, new_height
         # center = np.array([width / 2, height / 2], dtype=np.float32)
         # size = np.array([width, height], dtype=np.float32)
-        get_matrix = np.zeros((2,3),dtype=np.float32)
-        get_matrix[0,0] = new_scale
-        get_matrix[1,1] = new_scale
+        get_matrix = np.zeros((2, 3), dtype=np.float32)
+        get_matrix[0, 0] = new_scale
+        get_matrix[1, 1] = new_scale
         if self.norm_principal_point_offset:
-            get_matrix[0,2] = dst_width/2-mpoffset[0]*new_scale
-            get_matrix[1,2] = dst_height/2-mpoffset[1]*new_scale
-        img = cv2.warpAffine(img, get_matrix, (dst_width,dst_height))
+            get_matrix[0, 2] = dst_width / 2 - mpoffset[0] * new_scale
+            get_matrix[1, 2] = dst_height / 2 - mpoffset[1] * new_scale
+        img = cv2.warpAffine(img, get_matrix, (dst_width, dst_height))
         results['img'] = img
-        results['gt_bboxes']*=new_scale
-        results['gt_bboxes'][:,:2]+=get_matrix[:,2]
-        results['gt_bboxes'][:,2:]+=get_matrix[:,2]
-        results['centers2d']*=new_scale
-        results['centers2d']+=get_matrix[:,2]
-        results['kpts2d']*=new_scale
-        results['kpts2d']+=get_matrix[:,2]
-        results['img_shape']=(dst_height,dst_width)
-        results['cam2img'][0][0]*=new_scale
-        results['cam2img'][0][2]*=new_scale
-        results['cam2img'][0][2]+=get_matrix[0,2]
-        results['cam2img'][1][1]*=new_scale
-        results['cam2img'][1][2]*=new_scale
-        results['cam2img'][1][2]+=get_matrix[1,2]
-        #TODO 重新判断ptsvalid
+        results['gt_bboxes'] *= new_scale
+        results['gt_bboxes'][:, :2] += get_matrix[:, 2]
+        results['gt_bboxes'][:, 2:] += get_matrix[:, 2]
+        results['centers2d'] *= new_scale
+        results['centers2d'] += get_matrix[:, 2]
+        results['kpts2d'] *= new_scale
+        results['kpts2d'] += get_matrix[:, 2]
+        results['kpts2d_valid'][results['kpts2d_valid'] == 1] = \
+            ((results['kpts2d'][..., 0] > 0) * (results['kpts2d'][..., 0] < dst_width) *
+             (results['kpts2d'][..., 1] > 0) * (results['kpts2d'][..., 1] < dst_height))[results['kpts2d_valid'] == 1]
+        results['img_shape'] = (dst_height, dst_width)
+        results['cam2img'][0][0] *= new_scale
+        results['cam2img'][0][2] *= new_scale
+        results['cam2img'][0][2] += get_matrix[0, 2]
+        results['cam2img'][1][1] *= new_scale
+        results['cam2img'][1][2] *= new_scale
+        results['cam2img'][1][2] += get_matrix[1, 2]
         return results
 
     def __repr__(self):
