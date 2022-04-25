@@ -1,5 +1,5 @@
 dataset_type = 'KittiMonoDataset'
-data_root = 'data/kitti/'
+data_root = 'data/mini_kitti/'
 class_names = ['Pedestrian', 'Cyclist', 'Car']
 input_modality = dict(use_lidar=False, use_camera=True)
 img_norm_cfg = dict(
@@ -55,7 +55,7 @@ eval_pipeline = [
     dict(type='Collect3D', keys=['img'])
 ]
 data = dict(
-    samples_per_gpu=1,
+    samples_per_gpu=2,
     workers_per_gpu=1,
     train=dict(
         type=dataset_type,

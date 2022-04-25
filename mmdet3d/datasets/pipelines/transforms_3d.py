@@ -1676,6 +1676,7 @@ class PadBorders(object):
         results['cam2img'][1][2] += pad_t
 
         results['pad_shape'] = padded_img.shape
+        results['img_shape'] = padded_img.shape
         results['pad_fixed_size'] = self.size
         results['pad_size_divisor'] = self.size_divisor
 
@@ -1794,8 +1795,8 @@ class NormIntrinsicByResizeShift(object):
         img = results['img']
 
         height, width = img.shape[:2]
-        scale = self.focal_length / results['cam2img'][0][0]
-        mpoffset = (results['cam2img'][0][2], results['cam2img'][1][2])
+        scale = self.focal_length / results['cam2img'][0,0]
+        mpoffset = (results['cam2img'][0,2], results['cam2img'][1,2])
         new_height, new_width = int(height * scale), int(width * scale)
         new_scale = new_width / width
         if self.dst_size:
@@ -1822,13 +1823,13 @@ class NormIntrinsicByResizeShift(object):
         results['kpts2d_valid'][results['kpts2d_valid'] == 1] = \
             ((results['kpts2d'][..., 0] > 0) * (results['kpts2d'][..., 0] < dst_width) *
              (results['kpts2d'][..., 1] > 0) * (results['kpts2d'][..., 1] < dst_height))[results['kpts2d_valid'] == 1]
-        results['img_shape'] = (dst_height, dst_width)
-        results['cam2img'][0][0] *= new_scale
-        results['cam2img'][0][2] *= new_scale
-        results['cam2img'][0][2] += get_matrix[0, 2]
-        results['cam2img'][1][1] *= new_scale
-        results['cam2img'][1][2] *= new_scale
-        results['cam2img'][1][2] += get_matrix[1, 2]
+        results['img_shape'] = (dst_height, dst_width, 3)
+        results['cam2img'][0,0] *= new_scale
+        results['cam2img'][0,2] *= new_scale
+        results['cam2img'][0,2] += get_matrix[0, 2]
+        results['cam2img'][1,1] *= new_scale
+        results['cam2img'][1,2] *= new_scale
+        results['cam2img'][1,2] += get_matrix[1, 2]
         return results
 
     def __repr__(self):

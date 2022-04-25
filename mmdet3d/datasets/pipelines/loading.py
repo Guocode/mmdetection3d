@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import mmcv
 import numpy as np
-
+import torch
 from mmdet3d.core.points import BasePoints, get_points_type
 from mmdet.datasets.builder import PIPELINES
 from mmdet.datasets.pipelines import LoadAnnotations, LoadImageFromFile
@@ -92,7 +92,7 @@ class LoadImageFromFileMono3D(LoadImageFromFile):
             dict: The dict contains loaded image and meta information.
         """
         super().__call__(results)
-        results['cam2img'] = results['img_info']['cam_intrinsic']
+        results['cam2img'] = torch.asarray(results['img_info']['cam_intrinsic'])
         return results
 
 

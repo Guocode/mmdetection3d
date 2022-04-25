@@ -28,8 +28,8 @@ def kitti_data_prep(root_path,
         with_plane (bool, optional): Whether to use plane information.
             Default: False.
     """
-    # kitti.create_kitti_info_file(root_path, info_prefix, with_plane)
-    # kitti.create_reduced_point_cloud(root_path, info_prefix)
+    kitti.create_kitti_info_file(root_path, info_prefix, with_plane)
+    kitti.create_reduced_point_cloud(root_path, info_prefix)
 
     info_train_path = osp.join(root_path, f'{info_prefix}_infos_train.pkl')
     info_val_path = osp.join(root_path, f'{info_prefix}_infos_val.pkl')
@@ -41,7 +41,7 @@ def kitti_data_prep(root_path,
     kitti.export_2d_annotation(root_path, info_val_path)
     kitti.export_2d_annotation(root_path, info_trainval_path)
     kitti.export_2d_annotation(root_path, info_test_path)
-    exit()
+    # exit()
     create_groundtruth_database(
         'KittiDataset',
         root_path,

@@ -4,7 +4,7 @@ from .dla_neck import DLANeck
 from .imvoxel_neck import OutdoorImVoxelNeck
 from .pointnet2_fp_neck import PointNetFPNeck
 from .second_fpn import SECONDFPN
-
+from .rtm3d_neck import RTM3DNeck
 __all__ = [
-    'FPN', 'SECONDFPN', 'OutdoorImVoxelNeck', 'PointNetFPNeck', 'DLANeck'
+    'FPN', 'SECONDFPN', 'OutdoorImVoxelNeck', 'PointNetFPNeck', 'DLANeck','RTM3DNeck'
 ]

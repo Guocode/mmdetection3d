@@ -365,7 +365,7 @@ class MonoConHead(nn.Module):
                 scale_box_w = (gt_bbox[j][2] - gt_bbox[j][0]) * width_ratio
 
                 dim = gt_bbox_3d[j][3: 6]
-                alpha = gt_bbox_3d[j][6]#TODO label is roty
+                alpha = gt_bbox_3d[j][6]  # TODO label is roty
                 gt_kpt_2d_single = gt_kpt_2d[j]  # (9, 2)
                 gt_kpt_valid_mask_single = gt_kpt_valid_mask[j]  # (9,)
 
@@ -696,12 +696,13 @@ class MonoConHead(nn.Module):
             return losses
         else:
             raise NotImplementedError
+
+
 @HEADS.register_module()
 class MonoConHeadInference(MonoConHead):
-    def __init__(self,
-                 *args, **kwargs):
+    def __init__(self, *args, **kwargs):
         super(MonoConHeadInference, self).__init__(*args, **kwargs)
-	self.pred_bbox2d = False
+        self.pred_bbox2d = False
         self.wh_head = None
         self.offset_head = None
         self.kpt_heatmap_head = None
@@ -843,5 +844,5 @@ class MonoConHeadInference(MonoConHead):
 
         return batch_scores, batch_bboxes_3d, batch_topk_labels
 
-#TODO @HEADS.register_module()
+# TODO @HEADS.register_module()
 # class MonoConHead_DenseDepthPretrain(nn.Module)
