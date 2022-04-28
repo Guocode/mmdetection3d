@@ -1812,10 +1812,17 @@ class NormIntrinsicByResizeShift(object):
             get_matrix[0, 2] = dst_width / 2 - mpoffset[0] * new_scale
             get_matrix[1, 2] = dst_height / 2 - mpoffset[1] * new_scale
         img = cv2.warpAffine(img, get_matrix, (dst_width, dst_height))
+        if 'densedepth' in results:#TODO depth maxpool while downsampled
+            results['densedepth'] = cv2.warpAffine(results['densedepth'], get_matrix, (dst_width, dst_height),flags=cv2.INTER_NEAREST)
         results['img'] = img
         results['gt_bboxes'] *= new_scale
         results['gt_bboxes'][:, :2] += get_matrix[:, 2]
         results['gt_bboxes'][:, 2:] += get_matrix[:, 2]
+        results['gt_bboxes'][:, ::2] = np.clip(results['gt_bboxes'][:, ::2],a_min=0,a_max=dst_width)
+        results['gt_bboxes'][:, 1::2] = np.clip(results['gt_bboxes'][:, 1::2],a_min=0,a_max=dst_height)
+        gt_bboxes_wh = (results['gt_bboxes'][:, ::2]-results['gt_bboxes'][:, 1::2])
+        gt_bboxes_valid = (gt_bboxes_wh>3).all(-1)*(gt_bboxes_wh[:,0]/gt_bboxes_wh[:,1]<15)*(gt_bboxes_wh[:,0]/gt_bboxes_wh[:,1]>1/15)
+        results['gt_bboxes'] = results['gt_bboxes'][gt_bboxes_valid]
         results['centers2d'] *= new_scale
         results['centers2d'] += get_matrix[:, 2]
         results['kpts2d'] *= new_scale
@@ -1824,12 +1831,8 @@ class NormIntrinsicByResizeShift(object):
             ((results['kpts2d'][..., 0] > 0) * (results['kpts2d'][..., 0] < dst_width) *
              (results['kpts2d'][..., 1] > 0) * (results['kpts2d'][..., 1] < dst_height))[results['kpts2d_valid'] == 1]
         results['img_shape'] = (dst_height, dst_width, 3)
-        results['cam2img'][0,0] *= new_scale
-        results['cam2img'][0,2] *= new_scale
-        results['cam2img'][0,2] += get_matrix[0, 2]
-        results['cam2img'][1,1] *= new_scale
-        results['cam2img'][1,2] *= new_scale
-        results['cam2img'][1,2] += get_matrix[1, 2]
+        results['cam2img'][:2,:] *= new_scale
+        results['cam2img'][:2,2] += get_matrix[:, 2]
         return results
 
     def __repr__(self):

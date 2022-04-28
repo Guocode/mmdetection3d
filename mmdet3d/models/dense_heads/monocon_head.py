@@ -844,5 +844,3 @@ class MonoConHeadInference(MonoConHead):
 
         return batch_scores, batch_bboxes_3d, batch_topk_labels
 
-# TODO @HEADS.register_module()
-# class MonoConHead_DenseDepthPretrain(nn.Module)

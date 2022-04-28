@@ -75,7 +75,15 @@ class MonoCon(SingleStageDetector):
             for result_dict, img_bbox2d in zip(bbox_list, bbox2d_img):
                 result_dict['img_bbox2d'] = img_bbox2d
         return bbox_list
-
+    def simple_depth_test(self,img, img_metas,densedepth=None, rescale=False):
+        x = self.extract_feat(img)
+        losses = self.bbox_head.forward_train(x, img_metas, None,
+                                              None, None,
+                                              None, None, None,
+                                              None, None,
+                                              None, None,
+                                              densedepth=densedepth[0])
+        return [losses]
     def aug_test(self, imgs, img_metas, rescale=True):
         raise NotImplementedError
 

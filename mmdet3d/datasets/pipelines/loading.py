@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import os
 import mmcv
 import numpy as np
 import torch
@@ -95,6 +96,68 @@ class LoadImageFromFileMono3D(LoadImageFromFile):
         results['cam2img'] = torch.asarray(results['img_info']['cam_intrinsic'])
         return results
 
+@PIPELINES.register_module()
+class LoadDepthImageFromFile:
+    """Load an image from file.
+
+    Required keys are "depth_path" (a dict that must contain the
+    key "filename"). Added or updated keys are "filename", "img", "img_shape",
+    "ori_shape" (same as `img_shape`), "pad_shape" (same as `img_shape`),
+    "scale_factor" (1.0) and "img_norm_cfg" (means=0 and stds=1).
+
+    Args:
+        to_float32 (bool): Whether to convert the loaded image to a float32
+            numpy array. If set to False, the loaded image is an uint8 array.
+            Defaults to False.
+        color_type (str): The flag argument for :func:`mmcv.imfrombytes`.
+            Defaults to 'color'.
+        file_client_args (dict): Arguments to instantiate a FileClient.
+            See :class:`mmcv.fileio.FileClient` for details.
+            Defaults to ``dict(backend='disk')``.
+    """
+
+    def __init__(self,
+                 scale_rec=True,
+                 depth_type='uint16',
+                 depth_dir='depth',
+                 file_client_args=dict(backend='disk')):
+        self.scale_rec = scale_rec
+        self.depth_type = depth_type
+        self.depth_dir = depth_dir
+        self.file_client_args = file_client_args.copy()
+        self.file_client = None
+
+    def __call__(self, results):
+        """Call functions to load image and get image meta information.
+
+        Args:
+            results (dict): Result dict from :obj:`mmdet.CustomDataset`.
+
+        Returns:
+            dict: The dict contains loaded image and meta information.
+        """
+
+        if self.file_client is None:
+            self.file_client = mmcv.FileClient(**self.file_client_args)
+        if results['img_info'].get('depth_path'):
+            depth_path = results['img_info']['depth_path']
+        else:
+            depth_path = results['img_info']['filename'].replace('image_2',self.depth_dir)
+        if results['img_prefix'] is not None:
+            filename = os.path.join(results['img_prefix'],depth_path)
+        else:
+            filename = depth_path
+
+        img_bytes = self.file_client.get(filename)
+        img = mmcv.imfrombytes(img_bytes, flag=-1)
+        if self.scale_rec:
+            img = img.astype(np.float32)
+            img = np.power(img,2)/np.power(65535.,2)*200.
+
+        # results['filename'] = filename
+        # results['ori_filename'] = results['img_info']['filename']
+        results['densedepth'] = img
+        return results
 
 @PIPELINES.register_module()
 class LoadPointsFromMultiSweeps(object):

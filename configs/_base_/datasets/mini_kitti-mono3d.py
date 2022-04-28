@@ -24,7 +24,7 @@ train_pipeline = [
         type='Collect3D',
         keys=[
             'img', 'gt_bboxes', 'gt_labels', 'gt_bboxes_3d', 'gt_labels_3d',
-            'centers2d', 'depths','kpts2d','kpts2d_valid'
+            'centers2d', 'depths','kpts2d','kpts2d_valid','densedepth'
         ]),
 ]
 test_pipeline = [

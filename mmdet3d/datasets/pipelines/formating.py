@@ -208,7 +208,15 @@ class DefaultFormatBundle3D(DefaultFormatBundle):
         if 'points' in results:
             assert isinstance(results['points'], BasePoints)
             results['points'] = DC(results['points'].tensor)
-
+        if 'densedepth' in results:
+            if isinstance(results['densedepth'], list):
+                # process multiple imgs in single frame
+                imgs = [img.transpose(2, 0, 1) for img in results['densedepth']]
+                imgs = np.ascontiguousarray(np.stack(imgs, axis=0))
+                results['densedepth'] = DC(to_tensor(imgs), stack=True)
+            else:
+                img = np.ascontiguousarray(results['densedepth'][np.newaxis,...])
+                results['densedepth'] = DC(to_tensor(img), stack=True)
         for key in ['voxels', 'coors', 'voxel_centers', 'num_points']:
             if key not in results:
                 continue

@@ -70,7 +70,7 @@ class RTM3DNeck(BaseModule):
         # for i in range(self.end_level - self.start_level):
         #     outs.append(mlvl_features[i].clone())
         outs = self.deconv_layers(x[-1])
-        return [outs]
+        return (outs,)
     def _make_deconv_layer(self, num_layers, num_filters, num_kernels):
         assert num_layers == len(num_filters), \
             'ERROR: num_deconv_layers is different len(num_deconv_filters)'
