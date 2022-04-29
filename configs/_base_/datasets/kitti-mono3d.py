@@ -17,8 +17,8 @@ train_pipeline = [
     # dict(type='Resize', img_scale=(1242, 375), keep_ratio=True),
     # dict(type='RandomFlip3D', flip_ratio_bev_horizontal=0.5),
     dict(type='Normalize', **img_norm_cfg),
-    dict(type='NormIntrinsicByResizeShift',focal_length=710*0.25,norm_principal_point_offset=True,dst_size=(1248//4,384//4)),
-    # dict(type='PadBorders', size=(1248,384)),
+    dict(type='NormIntrinsic',focal_length=710*0.5,norm_principal_point_offset=True,dst_size=(1248,384)),
+    dict(type='AffineResize3D', dst_size=(1248,384)),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
     dict(
         type='Collect3D',

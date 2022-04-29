@@ -55,7 +55,7 @@ class DenseDepthHead(nn.Module):
     def forward_single(self, feat):
         densedepth_pred = self.densedepth_head(feat)
         return densedepth_pred,
-    @force_fp32(apply_to=('center_heatmap_preds','depth_preds'))
+    @force_fp32(apply_to=('center_heatmap_preds', 'depth_preds'))
     def loss(self,
              densedepth_preds,
              densedepth_gts,
@@ -63,12 +63,13 @@ class DenseDepthHead(nn.Module):
              attr_labels=None,
              proposal_cfg=None):
         loss_densedepth = dict()
-        for i,densedepth_pred in enumerate(densedepth_preds):
+        for i, densedepth_pred in enumerate(densedepth_preds):
             densedepth_gt_p = F.adaptive_max_pool2d(densedepth_gts, densedepth_pred.shape[-2:])
-            loss_densedepth['loss_densedepth_lvl_'+str(i)] = self.loss_densedepth(densedepth_pred*(densedepth_gt_p!=0),densedepth_gt_p)
+            gt_valid = (densedepth_gt_p != 0)
+            loss_densedepth['loss_densedepth_lvl_' + str(i)] = self.loss_densedepth(densedepth_pred[gt_valid],
+                                                                                    densedepth_gt_p[gt_valid])
 
         return loss_densedepth
-
 
     def forward_train(self,
                       x,
@@ -83,11 +84,10 @@ class DenseDepthHead(nn.Module):
                       **kwargs):
         outs = self(x)
 
-        loss_inputs = outs + (densedepth, img_metas, )
-        losses = self.loss(*loss_inputs,)
+        loss_inputs = outs + (densedepth, img_metas,)
+        losses = self.loss(*loss_inputs, )
 
         if proposal_cfg is None:
             return losses
         else:
             raise NotImplementedError
-

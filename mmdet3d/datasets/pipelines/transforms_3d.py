@@ -1775,7 +1775,10 @@ class RandomShiftScale(object):
 
 
 @PIPELINES.register_module()
-class NormIntrinsicByResizeShift(object):
+class NormIntrinsic(object):
+    """
+    resize to the same facal length and shift to principal point center.
+    """
 
     def __init__(self, focal_length=None, norm_principal_point_offset=False, dst_size=None):
         self.focal_length = focal_length
@@ -1795,47 +1798,163 @@ class NormIntrinsicByResizeShift(object):
         img = results['img']
 
         height, width = img.shape[:2]
-        scale = self.focal_length / results['cam2img'][0,0]
-        mpoffset = (results['cam2img'][0,2], results['cam2img'][1,2])
+        scale = self.focal_length / results['cam2img'][0, 0]
+        mpoffset = (results['cam2img'][0, 2], results['cam2img'][1, 2])
         new_height, new_width = int(height * scale), int(width * scale)
         new_scale = new_width / width
         if self.dst_size:
             dst_width, dst_height = self.dst_size
         else:
             dst_width, dst_height = new_width, new_height
-        # center = np.array([width / 2, height / 2], dtype=np.float32)
-        # size = np.array([width, height], dtype=np.float32)
         get_matrix = np.zeros((2, 3), dtype=np.float32)
         get_matrix[0, 0] = new_scale
         get_matrix[1, 1] = new_scale
         if self.norm_principal_point_offset:
             get_matrix[0, 2] = dst_width / 2 - mpoffset[0] * new_scale
             get_matrix[1, 2] = dst_height / 2 - mpoffset[1] * new_scale
-        img = cv2.warpAffine(img, get_matrix, (dst_width, dst_height))
-        if 'densedepth' in results:#TODO depth maxpool while downsampled
-            results['densedepth'] = cv2.warpAffine(results['densedepth'], get_matrix, (dst_width, dst_height),flags=cv2.INTER_NEAREST)
-        results['img'] = img
-        results['gt_bboxes'] *= new_scale
-        results['gt_bboxes'][:, :2] += get_matrix[:, 2]
-        results['gt_bboxes'][:, 2:] += get_matrix[:, 2]
-        results['gt_bboxes'][:, ::2] = np.clip(results['gt_bboxes'][:, ::2],a_min=0,a_max=dst_width)
-        results['gt_bboxes'][:, 1::2] = np.clip(results['gt_bboxes'][:, 1::2],a_min=0,a_max=dst_height)
-        gt_bboxes_wh = (results['gt_bboxes'][:, ::2]-results['gt_bboxes'][:, 1::2])
-        gt_bboxes_valid = (gt_bboxes_wh>3).all(-1)*(gt_bboxes_wh[:,0]/gt_bboxes_wh[:,1]<15)*(gt_bboxes_wh[:,0]/gt_bboxes_wh[:,1]>1/15)
-        results['gt_bboxes'] = results['gt_bboxes'][gt_bboxes_valid]
-        results['centers2d'] *= new_scale
-        results['centers2d'] += get_matrix[:, 2]
-        results['kpts2d'] *= new_scale
-        results['kpts2d'] += get_matrix[:, 2]
-        results['kpts2d_valid'][results['kpts2d_valid'] == 1] = \
-            ((results['kpts2d'][..., 0] > 0) * (results['kpts2d'][..., 0] < dst_width) *
-             (results['kpts2d'][..., 1] > 0) * (results['kpts2d'][..., 1] < dst_height))[results['kpts2d_valid'] == 1]
-        results['img_shape'] = (dst_height, dst_width, 3)
-        results['cam2img'][:2,:] *= new_scale
-        results['cam2img'][:2,2] += get_matrix[:, 2]
+        results['aug_trans_mat'] = get_matrix
         return results
 
     def __repr__(self):
         repr_str = self.__class__.__name__
-        repr_str += f'(intrinsic={self.intrinsic} '
+        repr_str += f'(intrinsic={self.focal_length} '
+        return repr_str
+
+
+@PIPELINES.register_module()
+class RandomShiftScale3D(object):
+    """Random shift scale.
+
+    Different from the normal shift and scale function, it doesn't
+    directly shift or scale image. It can record the shift and scale
+    infos into loading pipelines. It's designed to be used with
+    AffineResize together.
+
+    Args:
+        shift_scale (tuple[float]): Shift and scale range.
+        aug_prob (float): The shifting and scaling probability.
+    """
+
+    def __init__(self, shift_scale, aug_prob):
+        self.shift_scale = shift_scale
+        self.aug_prob = aug_prob
+
+    def __call__(self, results):
+        """Call function to record random shift and scale infos.
+
+        Args:
+            results (dict): Result dict from loading pipeline.
+
+        Returns:
+            dict: Results after random shift and scale, 'aug_trans_mat'
+        """
+        if random.random() < self.aug_prob:
+            img = results['img']
+            height, width = img.shape[:2]
+            center = np.array([width / 2, height / 2], dtype=np.float32)
+            size = np.array([width, height], dtype=np.float32)
+            shift, scale = self.shift_scale[0], self.shift_scale[1]
+            # scale_ranges = np.arange(1 - scale, 1 + scale + 0.1, 0.1)
+            scale_r = np.random.random()
+            new_scale = scale_r * (-scale) + (1 - scale_r) * scale  # random.choice(scale_ranges)
+            # shift_ranges = np.arange(-shift, shift + 0.1, 0.1)
+            shift_r_w = np.random.random()
+            shift_r_h = np.random.random()
+            new_shift_w = size[0] * (shift_r_w * (-shift) + (1 - shift_r_w) * shift)  # random.choice(shift_ranges)
+            new_shift_h = size[1] * (shift_r_h * (-shift) + (1 - shift_r_h) * shift)  # random.choice(shift_ranges)
+            get_matrix = np.zeros((2, 3), dtype=np.float32)
+            get_matrix[0, 0], get_matrix[1, 1] = new_scale, new_scale
+            get_matrix[0, 2] = new_shift_w
+            get_matrix[1, 2] = new_shift_h
+            results['aug_trans_mat'] = get_matrix
+
+        return results
+
+    def __repr__(self):
+        repr_str = self.__class__.__name__
+        repr_str += f'(shift_scale={self.shift_scale}, '
+        repr_str += f'aug_prob={self.aug_prob}) '
+        return repr_str
+
+
+@PIPELINES.register_module()
+class AffineResize3D(object):
+    """Get the affine transform matrices to the target size.
+
+    Different from :class:`RandomAffine` in MMDetection, this class can
+    calculate the affine transform matrices while resizing the input image
+    to a fixed size. The affine transform matrices include: 1) matrix
+    transforming original image to the network input image size. 2) matrix
+    transforming original image to the network output feature map size.
+
+    Args:
+        dst_size (tuple): Images scales for resizing.
+        bbox_clip_border (bool, optional): Whether clip the objects
+            outside the border of the image. Defaults to True.
+    """
+
+    def __init__(self, dst_size, affine_labels=True, bbox_clip_border=True):
+
+        self.dst_size = dst_size
+        self.affine_labels = affine_labels
+        self.bbox_clip_border = bbox_clip_border
+
+    def __call__(self, results):
+        """Call function to do affine transform to input image and labels.
+
+        Args:
+            results (dict): Result dict from loading pipeline.
+
+        Returns:
+            dict: Results after affine resize, 'affine_aug', 'trans_mat'
+                keys are added in the result dict.
+        """
+        # The results have gone through RandomShiftScale before AffineResize
+        if 'aug_trans_mat' not in results:
+            return results
+        get_matrix = results['aug_trans_mat']
+        assert get_matrix.shape == (2, 3)
+        results['img'] = cv2.warpAffine(results['img'], get_matrix, self.dst_size)
+        if 'densedepth' in results:  # TODO depth maxpool while downsampled
+            results['densedepth'] = cv2.warpAffine(results['densedepth'], get_matrix, self.dst_size,
+                                                   flags=cv2.INTER_NEAREST)
+        if self.affine_labels:
+            self._affine_labels(results, get_matrix)
+        results['img_shape'] = results['img'].shape
+        results['cam2img'][:2, :] *= get_matrix[0, 0]
+        results['cam2img'][:2, 2] += get_matrix[:, 2]
+        return results
+
+    def _affine_labels(self, results, get_matrix):
+        """Affine transform bboxes to input image.
+
+        Args:
+            results (dict): Result dict from loading pipeline.
+            get_matrix (np.ndarray): Matrix transforming original
+                image to the network input image size.
+                shape: (2, 3)
+        """
+
+        results['gt_bboxes'] *= get_matrix[0, 0]
+        results['gt_bboxes'][:, :2] += get_matrix[:, 2]
+        results['gt_bboxes'][:, 2:] += get_matrix[:, 2]
+        if self.bbox_clip_border:
+            results['gt_bboxes'][:, ::2] = np.clip(results['gt_bboxes'][:, ::2], a_min=0, a_max=self.dst_size[0])
+            results['gt_bboxes'][:, 1::2] = np.clip(results['gt_bboxes'][:, 1::2], a_min=0, a_max=self.dst_size[1])
+        gt_bboxes_wh = (results['gt_bboxes'][:, ::2] - results['gt_bboxes'][:, 1::2])
+        gt_bboxes_valid = (gt_bboxes_wh > 3).all(-1) * (gt_bboxes_wh[:, 0] / gt_bboxes_wh[:, 1] < 15) * (
+                gt_bboxes_wh[:, 0] / gt_bboxes_wh[:, 1] > 1 / 15)
+        results['gt_bboxes'] = results['gt_bboxes'][gt_bboxes_valid]
+        results['centers2d'] *= get_matrix[0, 0]
+        results['centers2d'] += get_matrix[:, 2]
+        results['kpts2d'] *= get_matrix[0, 0]
+        results['kpts2d'] += get_matrix[:, 2]
+        results['kpts2d_valid'][results['kpts2d_valid'] == 1] = \
+            ((results['kpts2d'][..., 0] > 0) * (results['kpts2d'][..., 0] < self.dst_size[0]) *
+             (results['kpts2d'][..., 1] > 0) * (results['kpts2d'][..., 1] < self.dst_size[1]))[
+                results['kpts2d_valid'] == 1]
+
+    def __repr__(self):
+        repr_str = self.__class__.__name__
+        repr_str += f'(dst_size={self.dst_size}, '
         return repr_str

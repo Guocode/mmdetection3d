@@ -6,6 +6,7 @@ img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 train_pipeline = [
     dict(type='LoadImageFromFileMono3D'),
+    dict(type='LoadDepthImageFromFile'),
     dict(
         type='LoadAnnotations3D',
         with_bbox=True,
@@ -17,8 +18,8 @@ train_pipeline = [
     # dict(type='Resize', img_scale=(1242, 375), keep_ratio=True),
     # dict(type='RandomFlip3D', flip_ratio_bev_horizontal=0.5),
     dict(type='Normalize', **img_norm_cfg),
-    dict(type='NormIntrinsicByResizeShift',focal_length=710*0.25,norm_principal_point_offset=True,dst_size=(1248//4,384//4)),
-    # dict(type='PadBorders', size=(1248,384)),
+    dict(type='NormIntrinsic',focal_length=710*0.25,norm_principal_point_offset=True,dst_size=(1248//4,384//4)),
+    dict(type='AffineResize3D', dst_size=(1248//4,384//4)),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
     dict(
         type='Collect3D',
