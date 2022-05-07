@@ -6,11 +6,9 @@ from mmdet.models.builder import LOSSES
 
 @LOSSES.register_module()
 class CenterNetGaussianFocalLoss(nn.Module):
-    """Calculate the IoU loss (1-IoU) of axis aligned bounding boxes.
+    """Calculate the focal loss
 
     Args:
-        reduction (str): Method to reduce losses.
-            The valid reduction method are none, sum or mean.
         loss_weight (float, optional): Weight of loss. Defaults to 1.0.
     """
 
@@ -22,7 +20,7 @@ class CenterNetGaussianFocalLoss(nn.Module):
         self.alpha = alpha
 
     def forward(self,
-                input,
+                pred,
                 target,
                 **kwargs):
         """Forward function of loss calculation.
@@ -51,8 +49,8 @@ class CenterNetGaussianFocalLoss(nn.Module):
 
         loss = 0
 
-        pos_loss = torch.log(input + eps) * torch.pow(1 - input, self.gamma) * pos_inds
-        neg_loss = torch.log(1 - input + eps) * torch.pow(input, self.gamma) * neg_weights * neg_inds
+        pos_loss = torch.log(pred + eps) * torch.pow(1 - pred, self.gamma) * pos_inds
+        neg_loss = torch.log(1 - pred + eps) * torch.pow(pred, self.gamma) * neg_weights * neg_inds
 
         pos_loss = pos_loss.sum()
         neg_loss = neg_loss.sum()

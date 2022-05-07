@@ -52,7 +52,7 @@ class MonoCon(SingleStageDetector):
         x = self.extract_feat(img)
         outs = self.bbox_head(x)
         bbox_outputs = self.bbox_head.get_bboxes(
-            *outs, img_metas, rescale=rescale)
+            *outs, img_metas)
 
         if not self.bbox_head.pred_bbox2d:
             bbox_img = []

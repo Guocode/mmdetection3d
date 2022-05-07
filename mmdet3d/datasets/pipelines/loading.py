@@ -93,7 +93,7 @@ class LoadImageFromFileMono3D(LoadImageFromFile):
             dict: The dict contains loaded image and meta information.
         """
         super().__call__(results)
-        results['cam2img'] = torch.asarray(results['img_info']['cam_intrinsic'])
+        results['cam2img'] = torch.asarray(results['img_info']['cam_intrinsic'])[:3,:3]
         return results
 
 @PIPELINES.register_module()

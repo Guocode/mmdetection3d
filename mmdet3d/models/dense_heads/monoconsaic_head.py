@@ -1,6 +1,9 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+# from LibMTL.weighting import GradNorm
+
 from mmcv.cnn import bias_init_with_prob, normal_init
 from mmcv.runner import force_fp32
 
@@ -9,6 +12,7 @@ from mmdet.models.builder import HEADS, build_loss
 from mmdet.models.utils.gaussian_target import (gaussian_radius, gen_gaussian_target)
 from mmdet.models.utils.gaussian_target import (get_local_maximum, get_topk_from_heatmap,
                                                 transpose_and_gather_feat)
+from mmcv.ops import boxes_iou_bev, diff_iou_rotated_3d
 
 INF = 1e8
 EPS = 1e-12
@@ -16,14 +20,13 @@ PI = np.pi
 
 
 @HEADS.register_module()
-class MonoConHead(nn.Module):
+class MonoConSAICHead(nn.Module):
     def __init__(self,
                  in_channel,
                  feat_channel,
                  num_classes,
                  bbox3d_code_size=7,
                  num_kpt=9,
-                 num_alpha_bins=12,
                  max_objs=30,
                  vector_regression_level=1,
                  pred_bbox2d=True,
@@ -35,27 +38,57 @@ class MonoConHead(nn.Module):
                  loss_kpt_heatmap_offset=None,
                  loss_dim=None,
                  loss_depth=None,
-                 loss_alpha_cls=None,
-                 loss_alpha_reg=None,
+                 loss_alpha_dir=None,
+                 loss_iou2d=None,
+                 loss_iou3d=None,
+                 scale_factor=4,
                  use_AN=False,
                  num_AN_affine=10,
                  train_cfg=None,
                  test_cfg=None,
                  init_cfg=None):
-        super(MonoConHead, self).__init__()
+        '''
+
+        Args:
+            in_channel:
+            feat_channel:
+            num_classes:
+            bbox3d_code_size:
+            num_kpt:
+            max_objs:
+            vector_regression_level:
+            pred_bbox2d:
+            loss_center_heatmap:
+            loss_wh:
+            loss_offset:
+            loss_center2kpt_offset:
+            loss_kpt_heatmap:
+            loss_kpt_heatmap_offset:
+            loss_dim:
+            loss_depth:
+            loss_alpha_dir:
+            loss_iou2d:
+            loss_iou3d:
+            scale_factor: scale factor to original image plane
+            use_AN:
+            num_AN_affine:
+            train_cfg:
+            test_cfg:
+            init_cfg:
+        '''
+        super(MonoConSAICHead, self).__init__()
         assert bbox3d_code_size >= 7
         self.num_classes = num_classes
-        self.bbox_code_size = bbox3d_code_size
+        self.bbox3d_code_size = bbox3d_code_size
         self.pred_bbox2d = pred_bbox2d
         self.max_objs = max_objs
         self.num_kpt = num_kpt
-        self.num_alpha_bins = num_alpha_bins
         self.vector_regression_level = vector_regression_level
 
         self.use_AN = use_AN
         self.num_AN_affine = num_AN_affine
         self.norm = nn.BatchNorm2d
-
+        self.scale_factor = scale_factor
         self.heatmap_head = self._build_head(in_channel, feat_channel, num_classes)
         self.wh_head = self._build_head(in_channel, feat_channel, 2)
         self.offset_head = self._build_head(in_channel, feat_channel, 2)
@@ -64,7 +97,10 @@ class MonoConHead(nn.Module):
         self.kpt_heatmap_offset_head = self._build_head(in_channel, feat_channel, 2)
         self.dim_head = self._build_head(in_channel, feat_channel, 3)
         self.depth_head = self._build_head(in_channel, feat_channel, 2)
-        self._build_dir_head(in_channel, feat_channel)
+        # self.dir_head = self._build_head(in_channel, feat_channel, 2)
+        self.alpha_dir_head = self._build_head(in_channel, feat_channel, 2)
+        self.iou2d_aware_head = self._build_head(in_channel, feat_channel, 1)
+        self.iou3d_aware_head = self._build_head(in_channel, feat_channel, 1)
 
         self.loss_center_heatmap = build_loss(loss_center_heatmap)
         self.loss_wh = build_loss(loss_wh)
@@ -73,17 +109,19 @@ class MonoConHead(nn.Module):
         self.loss_kpt_heatmap = build_loss(loss_kpt_heatmap)
         self.loss_kpt_heatmap_offset = build_loss(loss_kpt_heatmap_offset)
         self.loss_dim = build_loss(loss_dim)
+        self.loss_iou2d = build_loss(loss_iou2d)
+        self.loss_iou3d = build_loss(loss_iou3d)
+
         if 'Aware' in loss_dim['type']:
             self.dim_aware_in_loss = True
         else:
             self.dim_aware_in_loss = False
         self.loss_depth = build_loss(loss_depth)
-        self.loss_alpha_cls = build_loss(loss_alpha_cls)
-        self.loss_alpha_reg = build_loss(loss_alpha_reg)
-
+        self.loss_dir = build_loss(loss_alpha_dir)
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
         self.fp16_enabled = False
+        # self.mtl_loss = GradNorm()#TODO mtl loss
 
     def _build_head(self, in_channel, feat_channel, out_channel):
         layer = nn.Sequential(
@@ -92,15 +130,6 @@ class MonoConHead(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(feat_channel, out_channel, kernel_size=1))
         return layer
-
-    def _build_dir_head(self, in_channel, feat_channel):
-        self.dir_feat = nn.Sequential(
-            nn.Conv2d(in_channel, feat_channel, kernel_size=3, padding=1),
-            self._get_norm_layer(feat_channel),
-            nn.ReLU(inplace=True),
-        )
-        self.dir_cls = nn.Sequential(nn.Conv2d(feat_channel, self.num_alpha_bins, kernel_size=1))
-        self.dir_reg = nn.Sequential(nn.Conv2d(feat_channel, self.num_alpha_bins, kernel_size=1))
 
     def _get_norm_layer(self, feat_channel):
         return self.norm(feat_channel, momentum=0.03, eps=0.001) if not self.use_AN else \
@@ -111,8 +140,7 @@ class MonoConHead(nn.Module):
         self.heatmap_head[-1].bias.data.fill_(bias_init)  # -2.19
         self.kpt_heatmap_head[-1].bias.data.fill_(bias_init)
         for head in [self.wh_head, self.offset_head, self.center2kpt_offset_head, self.depth_head,
-                     self.kpt_heatmap_offset_head, self.dim_head, self.dir_feat,
-                     self.dir_cls, self.dir_reg]:
+                     self.kpt_heatmap_offset_head, self.dim_head, self.alpha_dir_head]:
             for m in head.modules():
                 if isinstance(m, nn.Conv2d):
                     normal_init(m, std=0.001)
@@ -135,15 +163,13 @@ class MonoConHead(nn.Module):
         depth_pred = self.depth_head(feat)
         depth_pred[:, 0, :, :] = 1. / (depth_pred[:, 0, :, :].sigmoid() + EPS) - 1
 
-        alpha_feat = self.dir_feat(feat)
-        alpha_cls_pred = self.dir_cls(alpha_feat)
-        alpha_offset_pred = self.dir_reg(alpha_feat)
+        alpha_dir_pred = F.normalize(self.alpha_dir_head(feat), dim=1)
         return center_heatmap_pred, wh_pred, offset_pred, center2kpt_offset_pred, kpt_heatmap_pred, \
-               kpt_heatmap_offset_pred, dim_pred, alpha_cls_pred, alpha_offset_pred, depth_pred
+               kpt_heatmap_offset_pred, dim_pred, alpha_dir_pred, depth_pred
 
     @force_fp32(apply_to=('center_heatmap_preds', 'wh_preds', 'offset_preds', 'center2kpt_offset_preds',
-                          'kpt_heatmap_preds', 'kpt_heatmap_offset_preds', 'dim_preds', 'alpha_cls_preds',
-                          'alpha_offset_preds', 'depth_preds'))
+                          'kpt_heatmap_preds', 'kpt_heatmap_offset_preds', 'dim_preds', 'alpha_dir_preds',
+                           'depth_preds'))
     def loss(self,
              center_heatmap_preds,
              wh_preds,
@@ -152,8 +178,7 @@ class MonoConHead(nn.Module):
              kpt_heatmap_preds,
              kpt_heatmap_offset_preds,
              dim_preds,
-             alpha_cls_preds,
-             alpha_offset_preds,
+             alpha_dir_preds,
              depth_preds,
              gt_bboxes,
              gt_labels,
@@ -170,7 +195,7 @@ class MonoConHead(nn.Module):
 
         assert len(center_heatmap_preds) == len(wh_preds) == len(offset_preds) \
                == len(center2kpt_offset_preds) == len(kpt_heatmap_preds) == len(kpt_heatmap_offset_preds) \
-               == len(dim_preds) == len(alpha_cls_preds) == len(alpha_offset_preds) == 1
+               == len(dim_preds) == len(alpha_dir_preds) == 1
 
         center_heatmap_pred = center_heatmap_preds[0]
         wh_pred = wh_preds[0]
@@ -179,11 +204,10 @@ class MonoConHead(nn.Module):
         kpt_heatmap_pred = kpt_heatmap_preds[0]
         kpt_heatmap_offset_pred = kpt_heatmap_offset_preds[0]
         dim_pred = dim_preds[0]
-        alpha_cls_pred = alpha_cls_preds[0]
-        alpha_offset_pred = alpha_offset_preds[0]
+        alpha_dir_pred = alpha_dir_preds[0]
         depth_pred = depth_preds[0]
 
-        batch_size = center_heatmap_pred.shape[0]
+        batch_size,_,feat_h,feat_w = center_heatmap_pred.shape
 
         target_result = self.get_targets(gt_bboxes, gt_labels,
                                          gt_bboxes_3d,
@@ -198,11 +222,13 @@ class MonoConHead(nn.Module):
         center_heatmap_target = target_result['center_heatmap_target']
         wh_target = target_result['wh_target']
         offset_target = target_result['offset_target']
+        bbox_target = target_result['bbox_target']
         center2kpt_offset_target = target_result['center2kpt_offset_target']
         dim_target = target_result['dim_target']
         depth_target = target_result['depth_target']
-        alpha_cls_target = target_result['alpha_cls_target']
-        alpha_offset_target = target_result['alpha_offset_target']
+        # alpha_cls_target = target_result['alpha_cls_target']
+        alpha_dir_target = target_result['alpha_dir_target']
+        bbox3d_target = target_result['bbox3d_target']
         kpt_heatmap_target = target_result['kpt_heatmap_target']
         kpt_heatmap_offset_target = target_result['kpt_heatmap_offset_target']
 
@@ -213,6 +239,8 @@ class MonoConHead(nn.Module):
         mask_center2kpt_offset = target_result['mask_center2kpt_offset']
         mask_kpt_heatmap_offset = target_result['mask_kpt_heatmap_offset']
 
+        cam2img = target_result['cam2img']
+
         # select desired preds and labels based on mask
 
         # 2d offset
@@ -221,21 +249,26 @@ class MonoConHead(nn.Module):
         # 2d size
         wh_pred = self.extract_input_from_tensor(wh_pred, indices, mask_target)
         wh_target = self.extract_target_from_tensor(wh_target, mask_target)
+        # 2d bbox
+        bbox_target = self.extract_target_from_tensor(bbox_target, mask_target)
         # 3d dim
         dim_pred = self.extract_input_from_tensor(dim_pred, indices, mask_target)
         dim_target = self.extract_target_from_tensor(dim_target, mask_target)
         # depth
         depth_pred = self.extract_input_from_tensor(depth_pred, indices, mask_target)
         depth_target = self.extract_target_from_tensor(depth_target, mask_target)
-        # alpha cls
-        alpha_cls_pred = self.extract_input_from_tensor(alpha_cls_pred, indices, mask_target)
-        alpha_cls_target = self.extract_target_from_tensor(alpha_cls_target, mask_target).type(torch.long)
-        alpha_cls_onehot_target = alpha_cls_target.new_zeros([len(alpha_cls_target), self.num_alpha_bins]).scatter_(
-            dim=1, index=alpha_cls_target.view(-1, 1), value=1)
+        # alpha dir
+        alpha_dir_pred = self.extract_input_from_tensor(alpha_dir_pred, indices, mask_target)
+        alpha_dir_target = self.extract_target_from_tensor(alpha_dir_target, mask_target)
+
+        # bbox3d_target = self.extract_input_from_tensor(bbox3d_target,mask_target)
+        # alpha_cls_target = self.extract_target_from_tensor(alpha_cls_target, mask_target).type(torch.long)
+        # alpha_cls_onehot_target = alpha_cls_target.new_zeros([len(alpha_cls_target), self.num_alpha_bins]).scatter_(
+        #     dim=1, index=alpha_cls_target.view(-1, 1), value=1)
         # alpha offset
-        alpha_offset_pred = self.extract_input_from_tensor(alpha_offset_pred, indices, mask_target)
-        alpha_offset_pred = torch.sum(alpha_offset_pred * alpha_cls_onehot_target, 1, keepdim=True)
-        alpha_offset_target = self.extract_target_from_tensor(alpha_offset_target, mask_target)
+        # alpha_offset_pred = self.extract_input_from_tensor(alpha_offset_pred, indices, mask_target)
+        # alpha_offset_pred = torch.sum(alpha_offset_pred * alpha_cls_onehot_target, 1, keepdim=True)
+        # alpha_offset_target = self.extract_target_from_tensor(alpha_offset_target, mask_target)
         # center2kpt offset
         center2kpt_offset_pred = self.extract_input_from_tensor(center2kpt_offset_pred,
                                                                 indices, mask_target)  # B * (num_kpt * 2)
@@ -254,6 +287,23 @@ class MonoConHead(nn.Module):
 
         loss_wh = self.loss_wh(wh_pred, wh_target)
         loss_offset = self.loss_offset(offset_pred, offset_target)
+
+        self.single_level_center_priors = self.get_single_level_center_priors(1, center_heatmap_pred.shape[2:],
+                                                                              1, center_heatmap_pred.dtype,
+                                                                              center_heatmap_pred.device, flatten=False)
+        single_level_center_priors = self.extract_input_from_tensor(
+            self.single_level_center_priors.permute((0, 3, 1, 2)).repeat([batch_size,1,1,1]),
+            indices % (feat_w*feat_h), mask_target)
+        xs, ys = single_level_center_priors[..., 0], single_level_center_priors[..., 1]
+        topk_xs = xs + offset_pred[..., 0]
+        topk_ys = ys + offset_pred[..., 1]
+        tl_x = (topk_xs - wh_pred[..., 0] / 2) * 4
+        tl_y = (topk_ys - wh_pred[..., 1] / 2) * 4
+        br_x = (topk_xs + wh_pred[..., 0] / 2) * 4
+        br_y = (topk_ys + wh_pred[..., 1] / 2) * 4
+        batch_bboxes_pred = torch.stack([tl_x, tl_y, br_x, br_y], dim=-1)
+        loss_iou2d = self.loss_iou2d(batch_bboxes_pred, bbox_target)
+
         if self.dim_aware_in_loss:
             loss_dim = self.loss_dim(dim_pred, dim_target, dim_pred)
         else:
@@ -270,12 +320,31 @@ class MonoConHead(nn.Module):
         loss_kpt_heatmap_offset = self.loss_kpt_heatmap_offset(kpt_heatmap_offset_pred, kpt_heatmap_offset_target,
                                                                avg_factor=(mask_kpt_heatmap_offset.sum() + EPS))
 
-        if mask_target.sum() > 0:
-            loss_alpha_cls = self.loss_alpha_cls(alpha_cls_pred, alpha_cls_onehot_target)
-        else:
-            loss_alpha_cls = 0.0
-        loss_alpha_reg = self.loss_alpha_reg(alpha_offset_pred, alpha_offset_target)
+        centers2d_pred = torch.stack([topk_xs,topk_ys],dim=-1)*4
 
+        # 1. decode alpha
+        alpha_pred = self.sincos2angle(alpha_dir_pred)  # self.decode_alpha_multibin(alpha_cls, alpha_offset)  # (b, k, 1)
+
+        # 1.5 get projected center
+        # center2d = batch_bboxes_pred  # (b, k, 2)
+
+        # 2. recover rotY
+        roty_pred = self.alpha2roty(centers2d_pred, alpha_pred, cam2img)  # (b, k, 3)
+
+        # 2.5 recover box3d_center from center2d and depth
+        center3d_pred = torch.cat([centers2d_pred, depth_pred], dim=-1)#.squeeze(0)
+        center3d_pred = self.pts2Dto3D(center3d_pred, cam2img)#.unsqueeze(0)
+
+        # 3. compose 3D box
+        batch_bboxes_3d_pred = torch.cat([center3d_pred, dim_pred, roty_pred.unsqueeze(-1)], dim=-1)
+
+        loss_iou3d = 1 - torch.mean(diff_iou_rotated_3d(batch_bboxes_3d_pred.view(1,-1,7), bbox3d_target.view(1,-1,7)))
+        # if mask_target.sum() > 0:
+        #     loss_alpha_cls = self.loss_alpha_cls(alpha_cls_pred, alpha_cls_onehot_target)
+        # else:
+        #     loss_alpha_cls = 0.0
+        # loss_alpha_dir = self.loss_dir(alpha_dir_pred, alpha_dir_target)
+        loss_alpha_dir = 1 - torch.mean(torch.sum(alpha_dir_pred * alpha_dir_target, dim=-1))  # neg cos
         return dict(
             loss_center_heatmap=loss_center_heatmap,
             loss_wh=loss_wh,
@@ -284,9 +353,10 @@ class MonoConHead(nn.Module):
             loss_center2kpt_offset=loss_center2kpt_offset,
             loss_kpt_heatmap=loss_kpt_heatmap,
             loss_kpt_heatmap_offset=loss_kpt_heatmap_offset,
-            loss_alpha_cls=loss_alpha_cls,
-            loss_alpha_reg=loss_alpha_reg,
+            loss_alpha_dir=loss_alpha_dir,
             loss_depth=loss_depth,
+            loss_iou2d=loss_iou2d,
+            loss_iou3d=loss_iou3d
         )
 
     def get_targets(self, gt_bboxes, gt_labels,
@@ -311,13 +381,13 @@ class MonoConHead(nn.Module):
         # 2D attributes
         wh_target = gt_bboxes[-1].new_zeros([bs, self.max_objs, 2])
         offset_target = gt_bboxes[-1].new_zeros([bs, self.max_objs, 2])
-
+        bbox_target = gt_bboxes[-1].new_zeros([bs, self.max_objs, 4])
         # 3D attributes
         dim_target = gt_bboxes[-1].new_zeros([bs, self.max_objs, 3])
-        alpha_cls_target = gt_bboxes[-1].new_zeros([bs, self.max_objs, 1])
-        alpha_offset_target = gt_bboxes[-1].new_zeros([bs, self.max_objs, 1])
+        alpha_dir_target = gt_bboxes[-1].new_zeros([bs, self.max_objs, 2])
+        # alpha_offset_target = gt_bboxes[-1].new_zeros([bs, self.max_objs, 1])
         depth_target = gt_bboxes[-1].new_zeros([bs, self.max_objs, 1])
-
+        bbox3d_target = []#gt_bboxes[-1].new_zeros([bs, self.max_objs, self.bbox3d_code_size])
         # 2D-3D kpt heatmap and offset
         center2kpt_offset_target = gt_bboxes[-1].new_zeros([bs, self.max_objs, self.num_kpt * 2])
         kpt_heatmap_target = gt_bboxes[-1].new_zeros([bs, self.num_kpt, feat_h, feat_w])
@@ -332,12 +402,11 @@ class MonoConHead(nn.Module):
         mask_center2kpt_offset = gt_bboxes[-1].new_zeros([bs, self.max_objs, self.num_kpt * 2])
         mask_kpt_heatmap_offset = gt_bboxes[-1].new_zeros([bs, self.max_objs, self.num_kpt * 2])
 
+        cam2img = []
         for batch_id in range(bs):
             img_meta = img_metas[batch_id]
-            cam_p2 = img_meta['cam2img']
 
             gt_bbox = gt_bboxes[batch_id]
-            calibs.append(cam_p2)
             if len(gt_bbox) < 1:
                 continue
             gt_label = gt_labels[batch_id]
@@ -350,8 +419,8 @@ class MonoConHead(nn.Module):
             gt_kpt_2d = gt_kpts_2d[batch_id]
             gt_kpt_valid_mask = gt_kpts_valid_mask[batch_id]
 
-            center_x = (gt_bbox[:, [0]] + gt_bbox[:, [2]]) * width_ratio / 2
-            center_y = (gt_bbox[:, [1]] + gt_bbox[:, [3]]) * height_ratio / 2
+            center_x = (gt_bbox[:, [0]] + gt_bbox[:, [2]]) / 2 * width_ratio
+            center_y = (gt_bbox[:, [1]] + gt_bbox[:, [3]]) / 2 * height_ratio
             gt_centers = torch.cat((center_x, center_y), dim=1)
 
             gt_kpt_2d = gt_kpt_2d.reshape(-1, self.num_kpt, 2)
@@ -365,8 +434,7 @@ class MonoConHead(nn.Module):
                 scale_box_w = (gt_bbox[j][2] - gt_bbox[j][0]) * width_ratio
 
                 dim = gt_bbox_3d[j][3: 6]
-                alpha = -torch.atan2(gt_bbox_3d[j, 0], gt_bbox_3d[j, 2]) + gt_bbox_3d[j, 6]
-                #gt_bbox_3d[j][6]
+                alpha = -torch.atan2(gt_bbox_3d[j, 0], gt_bbox_3d[j, 2]) + gt_bbox_3d[j, 6]  # roty to alpha
                 gt_kpt_2d_single = gt_kpt_2d[j]  # (9, 2)
                 gt_kpt_valid_mask_single = gt_kpt_valid_mask[j]  # (9,)
 
@@ -383,11 +451,12 @@ class MonoConHead(nn.Module):
                 wh_target[batch_id, j, 1] = scale_box_h
                 offset_target[batch_id, j, 0] = ctx - ctx_int
                 offset_target[batch_id, j, 1] = cty - cty_int
+                bbox_target[batch_id,j] = gt_bbox[j][0]
 
                 dim_target[batch_id, j] = dim
                 depth_target[batch_id, j] = depth[j]
-
-                alpha_cls_target[batch_id, j], alpha_offset_target[batch_id, j] = self.angle2class(alpha)
+                alpha_dir_target[batch_id, j] = self.angle2sincos(alpha)
+                bbox3d_target.append(gt_bbox_3d[j])
 
                 mask_target[batch_id, j] = 1
 
@@ -416,6 +485,7 @@ class MonoConHead(nn.Module):
                     kpt_heatmap_offset_target[batch_id, j, k * 2] = kptx - kptx_int
                     kpt_heatmap_offset_target[batch_id, j, k * 2 + 1] = kpty - kpty_int
                     mask_kpt_heatmap_offset[batch_id, j, k * 2:k * 2 + 2] = 1
+                cam2img.append(torch.asarray(img_meta['cam2img'])[:3,:3])
 
         indices_kpt = indices_kpt.reshape(bs, -1)
         mask_target = mask_target.type(torch.bool)
@@ -427,8 +497,8 @@ class MonoConHead(nn.Module):
             center2kpt_offset_target=center2kpt_offset_target,
             dim_target=dim_target,
             depth_target=depth_target,
-            alpha_cls_target=alpha_cls_target,
-            alpha_offset_target=alpha_offset_target,
+            alpha_dir_target=alpha_dir_target,
+            # alpha_offset_target=alpha_offset_target,
             kpt_heatmap_target=kpt_heatmap_target,
             kpt_heatmap_offset_target=kpt_heatmap_offset_target,
             indices=indices,
@@ -436,6 +506,9 @@ class MonoConHead(nn.Module):
             mask_target=mask_target,
             mask_center2kpt_offset=mask_center2kpt_offset,
             mask_kpt_heatmap_offset=mask_kpt_heatmap_offset,
+            bbox_target=bbox_target,
+            bbox3d_target=torch.stack(bbox3d_target,dim=0),
+            cam2img=torch.stack(cam2img,dim=0),
         )
 
         return target_result
@@ -449,32 +522,11 @@ class MonoConHead(nn.Module):
     def extract_target_from_tensor(target, mask):
         return target[mask]
 
-    def angle2class(self, angle):
-        ''' Convert continuous angle to discrete class and residual. '''
-        angle = angle % (2 * PI)
-        assert (angle >= 0 and angle <= 2 * PI)
-        angle_per_class = 2 * PI / float(self.num_alpha_bins)
-        shifted_angle = (angle + angle_per_class / 2) % (2 * PI)
-        class_id = int(shifted_angle / angle_per_class)
-        residual_angle = shifted_angle - (class_id * angle_per_class + angle_per_class / 2)
-        return class_id, residual_angle
+    def angle2sincos(self, angle):
+        return torch.stack([torch.sin(angle), torch.cos(angle)], dim=-1)
 
-    def class2angle(self, cls, residual):
-        ''' Inverse function to angle2class. '''
-        angle_per_class = 2 * PI / float(self.num_alpha_bins)
-        angle_center = cls * angle_per_class
-        angle = angle_center + residual
-        return angle
-
-    def decode_alpha_multibin(self, alpha_cls, alpha_offset):
-        alpha_score, cls = alpha_cls.max(dim=-1)
-        cls = cls.unsqueeze(2)
-        alpha_offset = alpha_offset.gather(2, cls)
-        alpha = self.class2angle(cls, alpha_offset)
-
-        alpha[alpha > PI] = alpha[alpha > PI] - 2 * PI
-        alpha[alpha < -PI] = alpha[alpha < -PI] + 2 * PI
-        return alpha
+    def sincos2angle(self, sincos):
+        return torch.atan2(sincos[..., 0], sincos[..., 1])
 
     def get_bboxes(self,
                    center_heatmap_preds,
@@ -484,16 +536,15 @@ class MonoConHead(nn.Module):
                    kpt_heatmap_preds,
                    kpt_heatmap_offset_preds,
                    dim_preds,
-                   alpha_cls_preds,
-                   alpha_offset_preds,
+                   alpha_dir_preds,
                    depth_preds,
                    img_metas,
-                   rescale=False):
+                   ):
 
         assert len(center_heatmap_preds) == len(wh_preds) == len(offset_preds) \
                == len(center2kpt_offset_preds) == len(kpt_heatmap_preds) == len(kpt_heatmap_offset_preds) \
-               == len(dim_preds) == len(alpha_cls_preds) == len(alpha_offset_preds) == 1
-        scale_factors = [img_meta['scale_factor'] for img_meta in img_metas]
+               == len(dim_preds) == len(alpha_dir_preds) ==  1
+        # scale_factors = [img_meta['scale_factor'] for img_meta in img_metas]
         box_type_3d = img_metas[0]['box_type_3d']
 
         batch_det_bboxes, batch_det_bboxes_3d, batch_labels = self.decode_heatmap(
@@ -504,22 +555,20 @@ class MonoConHead(nn.Module):
             kpt_heatmap_preds[0],
             kpt_heatmap_offset_preds[0],
             dim_preds[0],
-            alpha_cls_preds[0],
-            alpha_offset_preds[0],
+            alpha_dir_preds[0],
             depth_preds[0],
-            img_metas[0]['pad_shape'][:2],
-            img_metas[0]['cam_intrinsic'],
+            img_metas[0]['img_shape'][:2],
+            torch.stack([img_meta['cam2img'] for img_meta in img_metas],0),
             k=self.test_cfg.topk,
             kernel=self.test_cfg.local_maximum_kernel,
             thresh=self.test_cfg.thresh)
 
-        if rescale:
-            batch_det_bboxes[..., :4] /= batch_det_bboxes.new_tensor(
-                scale_factors).unsqueeze(1)
+        # if rescale:
+        #     batch_det_bboxes[..., :4] *= self.scale_factor
 
         det_results = [
             [box_type_3d(batch_det_bboxes_3d,
-                         box_dim=self.bbox_code_size, origin=(0.5, 0.5, 0.5)),
+                         box_dim=self.bbox3d_code_size, origin=(0.5, 0.5, 0.5)),
              batch_det_bboxes[:, -1],
              batch_labels,
              batch_det_bboxes,
@@ -535,15 +584,14 @@ class MonoConHead(nn.Module):
                        kpt_heatmap_pred,
                        kpt_heatmap_offset_pred,
                        dim_pred,
-                       alpha_cls_pred,
-                       alpha_offset_pred,
+                       alpha_dir_pred,
                        depth_pred,
                        img_shape,
-                       camera_intrinsic,
+                       cam2img,
                        k=100,
                        kernel=3,
                        thresh=0.4):
-        batch, cat, height, width = center_heatmap_pred.shape
+        batch, _, feat_h, feat_w = center_heatmap_pred.shape
         assert batch == 1
         inp_h, inp_w = img_shape
 
@@ -558,10 +606,10 @@ class MonoConHead(nn.Module):
         offset = transpose_and_gather_feat(offset_pred, batch_index)
         topk_xs = xs + offset[..., 0]
         topk_ys = ys + offset[..., 1]
-        tl_x = (topk_xs - wh[..., 0] / 2) * (inp_w / width)
-        tl_y = (topk_ys - wh[..., 1] / 2) * (inp_h / height)
-        br_x = (topk_xs + wh[..., 0] / 2) * (inp_w / width)
-        br_y = (topk_ys + wh[..., 1] / 2) * (inp_h / height)
+        tl_x = (topk_xs - wh[..., 0] / 2) * (inp_w / feat_w)
+        tl_y = (topk_ys - wh[..., 1] / 2) * (inp_h / feat_h)
+        br_x = (topk_xs + wh[..., 0] / 2) * (inp_w / feat_w)
+        br_y = (topk_ys + wh[..., 1] / 2) * (inp_h / feat_h)
 
         batch_bboxes = torch.stack([tl_x, tl_y, br_x, br_y], dim=2)
         batch_bboxes = torch.cat((batch_bboxes, batch_scores[..., None]),
@@ -569,8 +617,8 @@ class MonoConHead(nn.Module):
 
         # decode 3D prediction
         dim = transpose_and_gather_feat(dim_pred, batch_index)
-        alpha_cls = transpose_and_gather_feat(alpha_cls_pred, batch_index)
-        alpha_offset = transpose_and_gather_feat(alpha_offset_pred, batch_index)
+        alpha_dir = transpose_and_gather_feat(alpha_dir_pred, batch_index)
+        # alpha_offset = transpose_and_gather_feat(alpha_offset_pred, batch_index)
         depth_pred = transpose_and_gather_feat(depth_pred, batch_index)
         depth = depth_pred[:, :, 0:1]
 
@@ -583,23 +631,22 @@ class MonoConHead(nn.Module):
         center2kpt_offset[..., ::2] += xs.view(batch, k, 1).expand(batch, k, 1)
         center2kpt_offset[..., 1::2] += ys.view(batch, k, 1).expand(batch, k, 1)
 
-        kpts = center2kpt_offset
+        center2d = center2kpt_offset
 
-        kpts[..., ::2] *= (inp_w / width)
-        kpts[..., 1::2] *= (inp_h / height)
+        center2d[..., ::2] *= (inp_w / feat_w)
+        center2d[..., 1::2] *= (inp_h / feat_h)
 
         # 1. decode alpha
-        alpha = self.decode_alpha_multibin(alpha_cls, alpha_offset)  # (b, k, 1)
+        alpha = self.sincos2angle(alpha_dir)  # self.decode_alpha_multibin(alpha_cls, alpha_offset)  # (b, k, 1)
 
         # 1.5 get projected center
-        center2d = kpts  # (b, k, 2)
 
         # 2. recover rotY
-        rot_y = self.recover_rotation(kpts, alpha, camera_intrinsic)  # (b, k, 3)
+        rot_y = self.alpha2roty(center2d.view(batch*k,2), alpha.view(batch*k), cam2img.repeat(k,1,1)).view(batch,k,1) # (b, k, 3)
 
         # 2.5 recover box3d_center from center2d and depth
-        center3d = torch.cat([center2d, depth], dim=-1).squeeze(0)
-        center3d = self.pts2Dto3D(center3d, np.array(camera_intrinsic)).unsqueeze(0)
+        center3d = torch.cat([center2d, depth], dim=-1).view(-1,3)
+        center3d = self.pts2Dto3D(center3d, cam2img.repeat(k,1,1)).view(batch,k,3)
 
         # 3. compose 3D box
         batch_bboxes_3d = torch.cat([center3d, dim, rot_y], dim=-1)
@@ -611,12 +658,22 @@ class MonoConHead(nn.Module):
 
         return batch_bboxes, batch_bboxes_3d, batch_topk_labels
 
-    def recover_rotation(self, kpts, alpha, calib):
-        device = kpts.device
-        calib = torch.tensor(calib).type(torch.FloatTensor).to(device).unsqueeze(0)
+    def alpha2roty(self, centers, alpha, cam2img):
+        '''
 
-        si = torch.zeros_like(kpts[:, :, 0:1]) + calib[:, 0:1, 0:1]
-        rot_y = alpha + torch.atan2(kpts[:, :, 0:1] - calib[:, 0:1, 2:3], si)
+        Args:
+            centers: [N,2]
+            alpha: [N]
+            cam2img: [N,3,3]
+
+        Returns:
+            roty: [N]
+        '''
+        device = centers.device
+        cam2img = cam2img.to(device)#.unsqueeze(0)
+
+        si = cam2img[:, 0, 0]
+        rot_y = alpha + torch.atan2(centers[:, 0] - cam2img[:, 0, 2], si)
 
         while (rot_y > PI).any():
             rot_y[rot_y > PI] = rot_y[rot_y > PI] - 2 * PI
@@ -626,35 +683,36 @@ class MonoConHead(nn.Module):
         return rot_y
 
     @staticmethod
-    def pts2Dto3D(points, view):
+    def pts2Dto3D(points, cam2img):
         """
         Args:
             points (torch.Tensor): points in 2D images, [N, 3], \
                 3 corresponds with x, y in the image and depth.
-            view (np.ndarray): camera instrinsic, [3, 3]
+            cam2img (torch.Tensor): camera instrinsic, [N, 3, 3]
 
         Returns:
             torch.Tensor: points in 3D space. [N, 3], \
                 3 corresponds with x, y, z in 3D space.
         """
-        assert view.shape[0] <= 4
-        assert view.shape[1] <= 4
-        assert points.shape[1] == 3
-
+        # assert view.shape[0] <= 4
+        # assert view.shape[1] <= 4
+        # assert points.shape[1] == 3
+        cam2img = cam2img.to(points.device)
         points2D = points[:, :2]
-        depths = points[:, 2].view(-1, 1)
+        depths = points[:, 2:]#.view(-1, 1)
         unnorm_points2D = torch.cat([points2D * depths, depths], dim=1)
 
-        viewpad = torch.eye(4, dtype=points2D.dtype, device=points2D.device)
-        viewpad[:view.shape[0], :view.shape[1]] = points2D.new_tensor(view)
-        inv_viewpad = torch.inverse(viewpad).transpose(0, 1)
+        cam2img_mono = torch.nn.functional.pad(cam2img,(0,1,0,1))#torch.eye(4, dtype=points2D.dtype, device=points2D.device)
+        cam2img_mono[:,3,3]=1.
+        # viewpad[:view.shape[0], :view.shape[1]] = points2D.new_tensor(view)
+        inv_cam2img_mono = torch.inverse(cam2img_mono).permute(0, 2,1)
 
         # Do operation in homogenous coordinates.
         nbr_points = unnorm_points2D.shape[0]
         homo_points2D = torch.cat(
             [unnorm_points2D,
-             points2D.new_ones((nbr_points, 1))], dim=1)
-        points3D = torch.mm(homo_points2D, inv_viewpad)[:, :3]
+             points2D.new_ones((nbr_points, 1))], dim=1).view(-1,1,4)#
+        points3D = torch.bmm(homo_points2D, inv_cam2img_mono).view(-1,4)[:, :3]
 
         return points3D
 
@@ -698,150 +756,114 @@ class MonoConHead(nn.Module):
         else:
             raise NotImplementedError
 
+    @staticmethod
+    def get_single_level_center_priors(
+            batch_size, featmap_size, stride, dtype, device, flatten=True,
+    ):
+        """Generate centers of a single stage feature map.
+        Args:
+            batch_size (int): Number of images in one batch.
+            featmap_size (tuple[int]): height and width of the feature map
+            stride (int): down sample stride of the feature map
+            dtype (obj:`torch.dtype`): data type of the tensors
+            device (obj:`torch.device`): device of the tensors
+        Return:
+            priors (Tensor): center priors of a single level feature map.
+        """
+        h, w = featmap_size
+        x_range = (torch.arange(w, dtype=dtype, device=device)) * stride
+        y_range = (torch.arange(h, dtype=dtype, device=device)) * stride
+        y, x = torch.meshgrid(y_range, x_range)
+        if flatten:
+            y = y.flatten()
+            x = x.flatten()
+        # strides = x.new_full((x.shape[0],), stride)
+        proiors = torch.stack([x, y], dim=-1)
+        return proiors.unsqueeze(0)  # .repeat(batch_size, 1, 1)
 
-@HEADS.register_module()
-class MonoConHeadInference(MonoConHead):
-    def __init__(self, *args, **kwargs):
-        super(MonoConHeadInference, self).__init__(*args, **kwargs)
-        self.pred_bbox2d = False
-        self.wh_head = None
-        self.offset_head = None
-        self.kpt_heatmap_head = None
-        self.kpt_heatmap_offset_head = None
 
-    def init_weights(self):
-        bias_init = bias_init_with_prob(0.1)
-        self.heatmap_head[-1].bias.data.fill_(bias_init)  # -2.19
-        for head in [self.center2kpt_offset_head, self.depth_head,
-                     self.dim_head, self.dir_feat, self.dir_cls, self.dir_reg]:
-            for m in head.modules():
-                if isinstance(m, nn.Conv2d):
-                    normal_init(m, std=0.001)
+if __name__ == '__main__':
+    from mmdet3d.core.bbox import (Box3DMode, CameraInstance3DBoxes,
+                                   DepthInstance3DBoxes, LiDARInstance3DBoxes)
+    from mmdet3d.models.builder import build_head
+    from mmcv import Config
 
-    def forward_single(self, feat):
-        center_heatmap_pred = self.heatmap_head(feat).sigmoid()
-        center_heatmap_pred = torch.clamp(center_heatmap_pred, min=1e-4, max=1 - 1e-4)
+    # a = MonoConSAICHead.get_single_level_center_priors(1,(4,4),1,torch.float32,'cpu')
+    # print(a,a.shape)
+    # b = get_topk_from_heatmap(torch.asarray([0,1,0],dtype=torch.float32).reshape(1,1,3,1),k=1)
+    # print(b)
 
-        center2kpt_offset_pred = self.center2kpt_offset_head(feat)
-        dim_pred = self.dim_head(feat)
+    head_cfg = dict(
+        type='MonoConSAICHead',
+        in_channel=64,
+        feat_channel=64,
+        num_classes=3,
+        loss_center_heatmap=dict(type='CenterNetGaussianFocalLoss', loss_weight=1.0),
+        loss_wh=dict(type='L1Loss', loss_weight=0.1),
+        loss_offset=dict(type='L1Loss', loss_weight=1.0),
+        loss_iou2d=dict(type='GIoULoss', loss_weight=1.0),
+        loss_iou3d=dict(type='GIoULoss', loss_weight=1.0),
+        loss_center2kpt_offset=dict(type='L1Loss', loss_weight=1.0),
+        loss_kpt_heatmap=dict(type='CenterNetGaussianFocalLoss', loss_weight=1.0),
+        loss_kpt_heatmap_offset=dict(type='L1Loss', loss_weight=1.0),
+        loss_dim=dict(type='DimAwareL1Loss', loss_weight=1.0),
+        loss_depth=dict(type='LaplacianAleatoricUncertaintyLoss', loss_weight=1.0),
+        loss_alpha_dir=dict(type='L1Loss', loss_weight=1.0),
+        # test_cfg=dict(topk=30, local_maximum_kernel=3, max_per_img=30, thresh=0.4)
+    )
+    self = build_head(head_cfg).cuda()
+    self.test_cfg = Config(dict(topk=30, local_maximum_kernel=3, max_per_img=30, thresh=0.4))#.topk=30
+    # self.test_cfg.thresh=0.4
+    # self.test_cfg.local_maximum_kernel=3
+    feats = torch.rand([1, 64, 96, 312], dtype=torch.float32).cuda()
+    gt_bboxes = [
+        torch.Tensor([[722.4446, 151.0021, 832.2931, 314.5869]]).cuda(),
+    ]
+    gt_bboxes_3d = [
+        CameraInstance3DBoxes(torch.Tensor([[1.9047, 0.524511456489563, 8.4150, 1.2000, 1.8900, 0.4800, 0.0100]]), box_dim=7,origin=(0.5, 0.5, 0.5)),
+    ]
+    gt_labels = [torch.Tensor([1]).cuda().long() for i in range(1)]
+    gt_labels_3d = gt_labels
+    centers2d = [torch.Tensor([[775.7633, 231.4706]]).cuda(), ]
+    depths = [
+        torch.tensor([8.4150]).cuda(),
+    ]
+    kpts2d = [
+        torch.tensor([[[775.7633, 231.4706],
+                       [728.2701, 151.0556],
+                       [722.4446, 153.0757],
+                       [722.4446, 307.3683],
+                       [728.2701, 314.4005],
+                       [832.2931, 151.0021],
+                       [820.6868, 153.0279],
+                       [820.6868, 307.5345],
+                       [832.2931, 314.5869]]]).cuda()
+    ]
+    kpts2d_valid = [
+        torch.tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1]], dtype=torch.int32).cuda(),
+    ]
+    attr_labels = None
 
-        depth_pred = self.depth_head(feat)
-        depth_pred[:, 0, :, :] = 1. / (depth_pred[:, 0, :, :].sigmoid() + EPS) - 1
+    img_metas = [
+        dict(
+            cam2img=torch.asarray([[7.070493e+02, 0.000000e+00, 6.160814e+02],
+                                   [0.000000e+00, 7.070493e+02, 1.875066e+02],
+                                   [0.000000e+00, 0.000000e+00, 1.000000e+00], ]),
+            scale_factor=np.array([1., 1., 1., 1.], dtype=np.float32),
+            pad_shape=[128, 128],
+            trans_mat=np.array([[0.25, 0., 0.], [0., 0.25, 0], [0., 0., 1.]],
+                               dtype=np.float32),
+            affine_aug=False,
+            img_shape=(384, 1248, 3),
+            box_type_3d=CameraInstance3DBoxes) for i in range(1)
+    ]
+    ret_dict = self([feats])
 
-        alpha_feat = self.dir_feat(feat)
-        alpha_cls_pred = self.dir_cls(alpha_feat)
-        alpha_offset_pred = self.dir_reg(alpha_feat)
-        return center_heatmap_pred, center2kpt_offset_pred, dim_pred, alpha_cls_pred, alpha_offset_pred, depth_pred
+    losses = self.loss(*ret_dict, gt_bboxes, gt_labels, gt_bboxes_3d,
+                       gt_labels_3d, centers2d, depths, kpts2d, kpts2d_valid, img_metas)
 
-    @force_fp32(apply_to=('center_heatmap_preds', 'center2kpt_offset_preds',
-                          'dim_preds', 'alpha_cls_preds', 'alpha_offset_preds', 'depth_preds'))
-    def loss(self,
-             **kwargs):
-        raise NotImplementedError
-
-    def get_bboxes(self,
-                   center_heatmap_preds,
-                   center2kpt_offset_preds,
-                   dim_preds,
-                   alpha_cls_preds,
-                   alpha_offset_preds,
-                   depth_preds,
-                   img_metas,
-                   rescale=False):
-        assert len(center_heatmap_preds) == len(center2kpt_offset_preds) \
-               == len(dim_preds) == len(alpha_cls_preds) == len(alpha_offset_preds) == 1
-        scale_factors = [img_meta['scale_factor'] for img_meta in img_metas]
-        box_type_3d = img_metas[0]['box_type_3d']
-
-        batch_det_scores, batch_det_bboxes_3d, batch_labels = self.decode_heatmap(
-            center_heatmap_preds[0],
-            center2kpt_offset_preds[0],
-            dim_preds[0],
-            alpha_cls_preds[0],
-            alpha_offset_preds[0],
-            depth_preds[0],
-            img_metas[0]['pad_shape'][:2],
-            img_metas[0]['cam_intrinsic'],
-            k=self.test_cfg.topk,
-            kernel=self.test_cfg.local_maximum_kernel,
-            thresh=self.test_cfg.thresh)
-
-        det_results = [
-            [box_type_3d(batch_det_bboxes_3d,
-                         box_dim=self.bbox_code_size, origin=(0.5, 0.5, 0.5)),
-             batch_det_scores[:, -1],
-             batch_labels,
-             ]
-        ]
-        return det_results
-
-    def decode_heatmap(self,
-                       center_heatmap_pred,
-                       center2kpt_offset_pred,
-                       dim_pred,
-                       alpha_cls_pred,
-                       alpha_offset_pred,
-                       depth_pred,
-                       img_shape,
-                       camera_intrinsic,
-                       k=100,
-                       kernel=3,
-                       thresh=0.4):
-        batch, cat, height, width = center_heatmap_pred.shape
-        assert batch == 1
-        inp_h, inp_w = img_shape
-
-        center_heatmap_pred = get_local_maximum(
-            center_heatmap_pred, kernel=kernel)
-
-        *batch_dets, ys, xs = get_topk_from_heatmap(
-            center_heatmap_pred, k=k)
-        batch_scores, batch_index, batch_topk_labels = batch_dets
-
-        # decode 3D prediction
-        dim = transpose_and_gather_feat(dim_pred, batch_index)
-        alpha_cls = transpose_and_gather_feat(alpha_cls_pred, batch_index)
-        alpha_offset = transpose_and_gather_feat(alpha_offset_pred, batch_index)
-        depth_pred = transpose_and_gather_feat(depth_pred, batch_index)
-        depth = depth_pred[:, :, 0:1]
-
-        # change predict score based on sigma
-        sigma = depth_pred[:, :, 1]
-        sigma = torch.exp(-sigma)
-        batch_scores *= sigma
-        batch_scores = batch_scores[..., None]
-
-        # 0. get kpts prediction
-        center2kpt_offset = transpose_and_gather_feat(center2kpt_offset_pred, batch_index)
-        center2kpt_offset = center2kpt_offset.view(batch, k, self.num_kpt * 2)[..., -2:]
-        center2kpt_offset[..., ::2] += xs.view(batch, k, 1).expand(batch, k, 1)
-        center2kpt_offset[..., 1::2] += ys.view(batch, k, 1).expand(batch, k, 1)
-
-        kpts = center2kpt_offset
-
-        kpts[..., ::2] *= (inp_w / width)
-        kpts[..., 1::2] *= (inp_h / height)
-
-        # 1. decode alpha
-        alpha = self.decode_alpha_multibin(alpha_cls, alpha_offset)  # (b, k, 1)
-
-        # 1.5 get projected center
-        center2d = kpts  # (b, k, 2)
-
-        # 2. recover rotY
-        rot_y = self.recover_rotation(kpts, alpha, camera_intrinsic)  # (b, k, 3)
-
-        # 2.5 recover box3d_center from center2d and depth
-        center3d = torch.cat([center2d, depth], dim=-1).squeeze(0)
-        center3d = self.pts2Dto3D(center3d, np.array(camera_intrinsic)).unsqueeze(0)
-
-        # 3. compose 3D box
-        batch_bboxes_3d = torch.cat([center3d, dim, rot_y], dim=-1)
-
-        mask = batch_scores[..., -1] > thresh
-        batch_scores = batch_scores[mask]
-        batch_bboxes_3d = batch_bboxes_3d[mask]
-        batch_topk_labels = batch_topk_labels[mask]
-
-        return batch_scores, batch_bboxes_3d, batch_topk_labels
-
+    # test get_boxes
+    results = self.get_bboxes(*ret_dict, img_metas)
+    print(results)
+    assert len(results) == 2
+    assert len(results[0]) == 4

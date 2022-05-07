@@ -428,8 +428,11 @@ def export_2d_annotation(root_path, info_path, mono3d=True):
     coco_2d_dict = dict(annotations=[], images=[], categories=cat2Ids)
     from os import path as osp
     for infoid, info in enumerate(mmcv.track_iter_progress(kitti_infos)):
-        # if infoid>100:
-        #     break
+        # if (info['annos']['truncated']<0.8).all():
+        #     continue
+        # else:
+        #     print(info['image'],info['annos']['truncated'])
+        #     continue
         coco_infos = get_2d_boxes(info, occluded=[0, 1, 2, 3], mono3d=mono3d)
         (height, width,
          _) = mmcv.imread(osp.join(root_path,
@@ -584,7 +587,8 @@ def get_2d_boxes(info, occluded, mono3d=True):
 
             repro_rec['attribute_name'] = -1  # no attribute in KITTI
             repro_rec['attribute_id'] = -1
-
+            repro_rec['truncated'] = ann_rec['truncated']
+            repro_rec['occluded'] = ann_rec['occluded']
         repro_recs.append(repro_rec)
 
     return repro_recs

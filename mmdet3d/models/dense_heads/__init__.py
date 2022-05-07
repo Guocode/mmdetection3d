@@ -18,10 +18,11 @@ from .vote_head import VoteHead
 from .monocon_head import MonoConHead,MonoConHeadInference
 from .rtm3d_head import RTM3DHead
 from .densedepth_head import DenseDepthHead
+from .monoconsaic_head import MonoConSAICHead
 __all__ = [
     'Anchor3DHead', 'FreeAnchor3DHead', 'PartA2RPNHead', 'VoteHead',
     'SSD3DHead', 'BaseConvBboxHead', 'CenterHead', 'ShapeAwareHead',
     'BaseMono3DDenseHead', 'AnchorFreeMono3DHead', 'FCOSMono3DHead',
     'GroupFree3DHead', 'PointRPNHead', 'SMOKEMono3DHead', 'PGDHead',
-    'MonoFlexHead', 'MonoConHead','MonoConHeadInference','RTM3DHead','DenseDepthHead'
+    'MonoFlexHead', 'MonoConHead','MonoConHeadInference','RTM3DHead','DenseDepthHead','MonoConSAICHead'
 ]
