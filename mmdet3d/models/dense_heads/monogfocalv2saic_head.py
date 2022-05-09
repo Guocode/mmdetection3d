@@ -86,9 +86,9 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
                  in_channels,
                  loss_dfl=dict(type='DistributionFocalLoss', loss_weight=0.25),
                  loss_dir=dict(type='DirCosineLoss'),
-                 loss_dim=dict(type='DimAwareL1Loss'),
+                 loss_dim=dict(type='SmoothL1Loss'),
                  loss_depth=dict(type='UncertainSmoothL1Loss'),
-                 loss_offset2c3d=dict(type='L1Loss'),
+                 loss_offset2c3d=dict(type='SmoothL1Loss'),
                  reg_max=16,
                  reg_topk=4,
                  reg_channels=64,
@@ -684,7 +684,6 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
             loss_dim = self.loss_dim(
                 out_dim_preds[batch_pos_binds].reshape(-1, 3),
                 batch_bbox3d_targets[..., 3:6].reshape(-1, 3),
-                out_dim_preds[batch_pos_binds].reshape(-1, 3),
             )
             loss_depth = self.loss_depth(
                 out_depth_preds[batch_pos_binds].reshape(-1, 2),
