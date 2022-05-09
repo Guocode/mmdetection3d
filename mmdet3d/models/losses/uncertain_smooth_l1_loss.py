@@ -3,7 +3,7 @@ import torch
 from torch import nn as nn
 
 from mmdet.models.losses.utils import weighted_loss
-from ..builder import LOSSES
+from mmdet.models.builder import LOSSES
 
 
 @weighted_loss

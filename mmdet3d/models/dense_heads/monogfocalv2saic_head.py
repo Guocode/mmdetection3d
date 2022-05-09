@@ -7,7 +7,8 @@ from mmcv.runner import force_fp32
 from mmdet.core import (bbox2distance, build_assigner, build_sampler, distance2bbox,
                         images_to_levels, multi_apply, multiclass_nms,
                         reduce_mean, )
-from ..builder import HEADS, build_loss
+from mmdet.models.builder import HEADS, build_loss
+
 from mmdet.models.dense_heads.anchor_free_head import AnchorFreeHead
 import math
 

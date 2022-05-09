@@ -1,8 +1,5 @@
-import mmcv
 import numpy as np
 import torch
-from mmcv.parallel import DataContainer as DC
-from os import path as osp
 
 from mmdet3d.core import (CameraInstance3DBoxes, bbox3d2result,
                           mono_cam_box2vis, show_multi_modality_result)
