@@ -469,8 +469,8 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
         gt_labels = torch.asarray(gt_labels).to(device)
         num_gts = gt_labels.size(0)
         gt_bboxes = gt_bboxes.to(decoded_bboxes.dtype)
-        if not isinstance(gt_bboxes3d, torch.Tensor):
-            gt_bboxes3d = gt_bboxes3d.tensor.to(gt_bboxes.device)
+        if isinstance(gt_bboxes3d, CameraInstance3DBoxes):#target bbox3d with gravity center and alpha
+            gt_bboxes3d = torch.cat([gt_bboxes3d.gravity_center,gt_bboxes3d.dims,gt_bboxes3d.local_yaw[...,None]],dim=-1)#gt_bboxes3d.tensor.to(gt_bboxes.device)
 
         single_img_labels = center_priors.new_full(
             (num_priors,), self.num_classes, dtype=torch.long
@@ -675,8 +675,9 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
                 weight=weight_targets[:, None].expand(-1, 4).reshape(-1),
                 avg_factor=4.0 * bbox_avg_factor,
             )
-            batch_alpha_targets = -torch.atan2(batch_bbox3d_targets[..., 0], batch_bbox3d_targets[..., 2]) + \
-                                  batch_bbox3d_targets[..., 6]
+            # batch_alpha_targets = -torch.atan2(batch_bbox3d_targets[..., 0], batch_bbox3d_targets[..., 2]) + \
+            #                       batch_bbox3d_targets[..., 6]
+            batch_alpha_targets = batch_bbox3d_targets[..., 6]
             loss_dir = self.loss_dir(
                 out_dir_preds[batch_pos_binds].reshape(-1, 2),
                 batch_alpha_targets.reshape(-1),
