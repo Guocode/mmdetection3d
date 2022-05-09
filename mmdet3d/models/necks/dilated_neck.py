@@ -162,7 +162,7 @@ class DilatedNeck(BaseModule):
         p3 = self.smooth3(self.latter3(c3) + self.deconv3(p4))
         p2 = self.smooth2(self.latter2(c2) + self.deconv2(p3))
 
-        return (p2,)
+        return (p2,p3,p4,p5)
     def _get_deconv_cfg(self, deconv_kernel, index):
         if deconv_kernel == 4:
             padding = 1

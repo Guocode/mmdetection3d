@@ -1646,10 +1646,11 @@ class PadBorders(object):
         pad_val (float, optional): Padding value, 0 by default.
     """
 
-    def __init__(self, size=None, size_divisor=None, pad_val=0):
+    def __init__(self, size=None, size_divisor=None, pad_val=0,affine_label=True):
         self.size = size
         self.size_divisor = size_divisor
         self.pad_val = pad_val
+        self.affine_label = affine_label
         # only one of size and size_divisor should be valid
         assert size is not None or size_divisor is not None
         assert size is None or size_divisor is None
@@ -1668,13 +1669,15 @@ class PadBorders(object):
             elif self.size_divisor is not None:
                 padded_img = mmcv.impad_to_multiple(
                     results[key], self.size_divisor, pad_val=self.pad_val)
+                pad_l = 0
+                pad_t = 0
             results[key] = padded_img
-        results['kpts2d'][:, :, :] += (pad_l, pad_t)
-        results['centers2d'][:, :] += (pad_l, pad_t)
-        results['gt_bboxes'][:, :] += (pad_l, pad_t, pad_l, pad_t)
+        if self.affine_label:
+            results['kpts2d'][:, :, :] += (pad_l, pad_t)
+            results['centers2d'][:, :] += (pad_l, pad_t)
+            results['gt_bboxes'][:, :] += (pad_l, pad_t, pad_l, pad_t)
         results['cam2img'][0][2] += pad_l
         results['cam2img'][1][2] += pad_t
-
         results['pad_shape'] = padded_img.shape
         results['img_shape'] = padded_img.shape
         results['pad_fixed_size'] = self.size

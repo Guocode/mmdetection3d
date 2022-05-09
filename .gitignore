@@ -106,7 +106,6 @@ venv.bak/
 .mypy_cache/
 
 # cython generated cpp
-data
 .vscode
 .idea
 
@@ -133,3 +132,8 @@ data/sunrgbd/OFFICIAL_SUNRGBD/
 
 # Waymo evaluation
 mmdet3d/core/evaluation/waymo_utils/compute_detection_metrics_main
+/data/lyft/
+/data/kitti/
+/data/s3dis/
+/data/scannet/
+/data/sunrgbd/

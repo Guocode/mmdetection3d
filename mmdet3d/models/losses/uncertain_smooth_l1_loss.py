@@ -85,9 +85,8 @@ class UncertainSmoothL1Loss(nn.Module):
         self.loss_weight = loss_weight
 
     def forward(self,
-                pred,
+                predwithsigma,
                 target,
-                sigma,
                 weight=None,
                 avg_factor=None,
                 reduction_override=None,
@@ -109,6 +108,8 @@ class UncertainSmoothL1Loss(nn.Module):
         assert reduction_override in (None, 'none', 'mean', 'sum')
         reduction = (
             reduction_override if reduction_override else self.reduction)
+        pred = predwithsigma[...,0]
+        sigma = predwithsigma[...,1]
         loss_bbox = self.loss_weight * uncertain_smooth_l1_loss(
             pred,
             target,

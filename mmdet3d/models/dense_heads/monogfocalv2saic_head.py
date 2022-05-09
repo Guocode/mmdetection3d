@@ -4,14 +4,20 @@ import torch.nn.functional as F
 from mmcv.cnn import ConvModule, Scale, bias_init_with_prob, normal_init
 from mmcv.runner import force_fp32
 
-from mmdet.core import (anchor_inside_flags, bbox2distance, bbox_overlaps,
-                        build_assigner, build_sampler, distance2bbox,
+from mmdet.core import (bbox2distance, build_assigner, build_sampler, distance2bbox,
                         images_to_levels, multi_apply, multiclass_nms,
-                        reduce_mean, unmap,MlvlPointGenerator,bbox_xyxy_to_cxcywh)
-from mmdet.models.builder import HEADS, build_loss
-from mmdet.models.dense_heads.anchor_head import AnchorHead
+                        reduce_mean, )
+from ..builder import HEADS, build_loss
 from mmdet.models.dense_heads.anchor_free_head import AnchorFreeHead
 import math
+
+from ...core import CameraInstance3DBoxes
+
+INF = 1e8
+EPS = 1e-12
+PI = math.pi
+
+
 class Integral(nn.Module):
     """A fixed layer for calculating integral result from distribution.
     This layer calculates the target location by :math: `sum{P(y_i) * y_i}`,
@@ -77,15 +83,17 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
     def __init__(self,
                  num_classes,
                  in_channels,
-                 # stacked_convs=4,
-                 # conv_cfg=None,
-                 # strides=[8, 16, 32 ,64, 128],
-                 # norm_cfg=dict(type='BN', momentum=0.03, eps=0.001),
                  loss_dfl=dict(type='DistributionFocalLoss', loss_weight=0.25),
+                 loss_dir=dict(type='DirCosineLoss'),
+                 loss_dim=dict(type='DimAwareL1Loss'),
+                 loss_depth=dict(type='UncertainSmoothL1Loss'),
+                 loss_offset2c3d=dict(type='L1Loss'),
                  reg_max=16,
                  reg_topk=4,
                  reg_channels=64,
                  add_mean=True,
+                 aux_reg=True,
+                 bbox3d_code_size=7,
                  **kwargs):
 
         self.reg_max = reg_max
@@ -93,6 +101,8 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
         self.reg_channels = reg_channels
         self.add_mean = add_mean
         self.total_dim = reg_topk
+        self.aux_reg = aux_reg
+        self.bbox3d_code_size = bbox3d_code_size
         if add_mean:
             self.total_dim += 1
         print('total dim = ', self.total_dim * 4)
@@ -109,11 +119,18 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
         self.integral = Integral(self.reg_max)
         self.loss_dfl = build_loss(loss_dfl)
 
+        self.loss_dir = build_loss(loss_dir)
+        self.loss_dim = build_loss(loss_dim)
+        self.loss_depth = build_loss(loss_depth)
+        self.loss_offset2c3d = build_loss(loss_offset2c3d)
+
     def _init_layers(self):
         """Initialize layers of the head."""
         self.relu = nn.ReLU(inplace=True)
         self.cls_convs = nn.ModuleList()
         self.reg_convs = nn.ModuleList()
+        self.reg3d_convs = nn.ModuleList()
+
         for i in range(self.stacked_convs):
             chn = self.in_channels if i == 0 else self.feat_channels
             self.cls_convs.append(
@@ -134,14 +151,47 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
                     padding=1,
                     conv_cfg=self.conv_cfg,
                     norm_cfg=self.norm_cfg))
+            self.reg3d_convs.append(
+                ConvModule(
+                    chn,
+                    self.feat_channels,
+                    3,
+                    stride=1,
+                    padding=1,
+                    conv_cfg=self.conv_cfg,
+                    norm_cfg=self.norm_cfg))
         # assert self.num_anchors == 1, 'anchor free version'
-        self.gfl_cls = nn.Conv2d(
-            self.feat_channels, self.num_classes, 3, padding=1)
+
+        # self.gfl_cls = nn.Conv2d(
+        #     self.feat_channels, self.num_classes, 3, padding=1)
+        self.gfl_cls = nn.Sequential(
+            nn.Conv2d(self.feat_channels, self.num_classes, 3, padding=1),
+            nn.Sigmoid()
+        )
         self.gfl_reg = nn.Conv2d(
             self.feat_channels, 4 * (self.reg_max + 1), 3, padding=1)
-        # self.scales = nn.ModuleList(
-        #     [Scale(1.0) for _ in self.strides])
+        # 3D
+        self.dir_reg = nn.Conv2d(
+            self.feat_channels, 2, 3, padding=1)
+        self.dim_reg = nn.Conv2d(
+            self.feat_channels, 3, 3, padding=1)
+        self.depth_reg = nn.Conv2d(
+            self.feat_channels, 2, 3, padding=1)
+        self.offset2c3d_reg = nn.Conv2d(
+            self.feat_channels, 2, 3, padding=1)
+        # aux reg
+        if self.aux_reg:
+            self.offset2kpts_reg = nn.Conv2d(
+                self.feat_channels, 8 * 2, 3, padding=1)
+            self.c3dkptshm_reg = nn.Conv2d(
+                self.feat_channels, 8 + 1, 3, padding=1)
 
+        self.scales2d = nn.ModuleList(
+            [Scale(1.0) for _ in self.strides])
+        self.scales3d_depth = nn.ModuleList(
+            [Scale(1.0) for _ in self.strides])
+        self.scales3d_offset2c3d = nn.ModuleList(
+            [Scale(1.0) for _ in self.strides])
         conf_vector = [nn.Conv2d(4 * self.total_dim, self.reg_channels, 1)]
         conf_vector += [self.relu]
         conf_vector += [nn.Conv2d(self.reg_channels, 1, 1), nn.Sigmoid()]
@@ -154,12 +204,38 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
             normal_init(m.conv, std=0.01)
         for m in self.reg_convs:
             normal_init(m.conv, std=0.01)
+        for m in self.reg3d_convs:
+            normal_init(m.conv, std=0.01)
         for m in self.reg_conf:
             if isinstance(m, nn.Conv2d):
                 normal_init(m, std=0.01)
         bias_cls = bias_init_with_prob(0.01)
         normal_init(self.gfl_cls, std=0.01, bias=bias_cls)
         normal_init(self.gfl_reg, std=0.01)
+    def forward_train(self,
+                      x,
+                      img_metas,
+                      gt_bboxes,
+                      gt_labels=None,
+                      gt_bboxes_3d=None,
+                      gt_kpts_2d=None,
+                      gt_kpts_valid_mask=None,
+                      attr_labels=None,
+                      gt_bboxes_ignore=None,
+                      proposal_cfg=None,
+                      **kwargs):
+        outs = self(x)
+        assert gt_labels is not None
+        assert attr_labels is None
+        loss_inputs = outs + (gt_bboxes, gt_labels, gt_bboxes_3d,
+                              gt_kpts_2d, gt_kpts_valid_mask,
+                              img_metas)
+        losses = self.loss(*loss_inputs)
+
+        if proposal_cfg is None:
+            return losses
+        else:
+            raise NotImplementedError
 
     def forward(self, feats):
         """Forward features from the upstream network.
@@ -175,17 +251,21 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
                     scale levels, each is a 4D-tensor, the channel number is
                     4*(n+1), n is max value of integral set.
         """
-        out_bbox_pred = []
         out_cls_score = []
-        # cls_feat = x
-        # reg_feat = x
-        for feat in feats:
+        out_bbox_pred = []
+        out_dir_pred = []
+        out_dim_pred = []
+        out_depth_pred = []
+        out_offset2c3d_pred = []
+
+        for lvlid, feat in enumerate(feats):
             for cls_conv in self.cls_convs:
                 cls_feat = cls_conv(feat)
             for reg_conv in self.reg_convs:
                 reg_feat = reg_conv(feat)
-
-            bbox_pred = self.gfl_reg(reg_feat).float()
+            for reg3d_conv in self.reg3d_convs:
+                reg3d_feat = reg3d_conv(feat)
+            bbox_pred = self.scales2d[lvlid](self.gfl_reg(reg_feat)).float()
             N, C, H, W = bbox_pred.size()
             prob = F.softmax(bbox_pred.reshape(N, 4, self.reg_max + 1, H, W), dim=2)
             prob_topk, _ = prob.topk(self.reg_topk, dim=2)
@@ -197,19 +277,51 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
                 stat = prob_topk
 
             quality_score = self.reg_conf(stat.reshape(N, -1, H, W))
-            cls_score = self.gfl_cls(cls_feat).sigmoid() * quality_score
+            # cls_score = self.gfl_cls(cls_feat).sigmoid() * quality_score
+            cls_score = self.gfl_cls(cls_feat) * quality_score
+            # 3D
+            dir_pred = F.normalize(self.dir_reg(reg3d_feat), dim=1)
+            dim_pred = self.dim_reg(reg3d_feat)
+            depth_pred = self.depth_reg(reg3d_feat)
+            depth_pred[:, 0, :, :] = self.scales3d_depth[lvlid](
+                1. / (depth_pred[:, 0, :, :].sigmoid() + EPS) - 1).float()
+
+            offset2c3d_pred = self.scales3d_offset2c3d[lvlid](self.offset2c3d_reg(reg3d_feat)).float()
+            # aux
+            if self.aux_reg:
+                ofset2kpts_pred = self.offset2kpts_reg(reg3d_feat)
+                c3dkptshm_pred = self.c3dkptshm_reg(reg3d_feat)
+
             out_cls_score.append(cls_score.flatten(start_dim=2))
             out_bbox_pred.append(bbox_pred.flatten(start_dim=2))
-        out_cls_score = torch.cat(out_cls_score,dim=2).permute(0, 2, 1)
-        out_bbox_pred = torch.cat(out_bbox_pred,dim=2).permute(0, 2, 1)
-        return out_cls_score,out_bbox_pred#multi_apply(self.forward_single, feats, self.scales)
+            out_dir_pred.append(dir_pred.flatten(start_dim=2))
+            out_dim_pred.append(dim_pred.flatten(start_dim=2))
+            out_depth_pred.append(depth_pred.flatten(start_dim=2))
+            out_offset2c3d_pred.append(offset2c3d_pred.flatten(start_dim=2))
 
-    @force_fp32(apply_to=('cls_scores', 'bbox_preds'))
+        out_cls_scores = torch.cat(out_cls_score, dim=2).permute(0, 2, 1)
+        out_bbox_preds = torch.cat(out_bbox_pred, dim=2).permute(0, 2, 1)
+        out_dir_preds = torch.cat(out_dir_pred, dim=2).permute(0, 2, 1)
+        out_dim_preds = torch.cat(out_dim_pred, dim=2).permute(0, 2, 1)
+        out_depth_preds = torch.cat(out_depth_pred, dim=2).permute(0, 2, 1)
+        out_offset2c3d_preds = torch.cat(out_offset2c3d_pred, dim=2).permute(0, 2, 1)
+
+        return out_cls_scores, out_bbox_preds, out_dir_preds, out_dim_preds, out_depth_preds, out_offset2c3d_preds  # multi_apply(self.forward_single, feats, self.scales)
+
+    @force_fp32(apply_to=('out_cls_scores', 'out_bbox_preds', 'out_dir_preds', 'out_dim_preds', 'out_depth_preds',
+                          'out_offset2c3d_preds'))
     def loss(self,
-             cls_scores,
-             bbox_preds,
+             out_cls_scores,
+             out_bbox_preds,
+             out_dir_preds,
+             out_dim_preds,
+             out_depth_preds,
+             out_offset2c3d_preds,
              gt_bboxes,
              gt_labels,
+             gt_bboxes3d,
+             gt_kpts2d,
+             gt_kpts2d_valid,
              img_metas,
              gt_bboxes_ignore=None):
         """Compute losses of the head.
@@ -234,36 +346,46 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
             (math.ceil(input_height / stride), math.ceil(input_width / stride))
             for stride in self.strides
         ]
-        batch_size = cls_scores.shape[0]
+        batch_size = out_cls_scores.shape[0]
         assert len(featmap_sizes) == self.prior_generator.num_levels
 
-        multi_lvl_ltcenter_priors = self.get_multi_lvl_ltcenter_priors(batch_size,featmap_sizes,self.strides,dtype=torch.float32,device=cls_scores.device)
+        multi_lvl_ltcenter_priors = self.get_multi_lvl_ltcenter_priors(batch_size, featmap_sizes, self.strides,
+                                                                       dtype=torch.float32,
+                                                                       device=out_cls_scores.device)
         # label_channels = self.cls_out_channels if self.use_sigmoid_cls else 1
-        dis_preds = self.integral(bbox_preds) * multi_lvl_ltcenter_priors[..., 2, None]
+        dis_preds = self.integral(out_bbox_preds) * multi_lvl_ltcenter_priors[..., 2, None]
         decoded_bboxes = distance2bbox(multi_lvl_ltcenter_priors[..., :2], dis_preds)
-
-        batch_assign_res = self.get_targets(cls_scores,
-                multi_lvl_ltcenter_priors,
-                decoded_bboxes,
-                gt_bboxes,
-                gt_labels,)
-        loss, loss_states = self._get_loss_from_assign(
-            cls_scores, bbox_preds, decoded_bboxes, batch_assign_res
+        decoded_c3d = multi_lvl_ltcenter_priors[..., :2] + out_offset2c3d_preds * multi_lvl_ltcenter_priors[
+            ..., 2, None]
+        batch_target_res = self.get_targets(out_cls_scores,
+                                            multi_lvl_ltcenter_priors,
+                                            decoded_bboxes,
+                                            gt_bboxes,
+                                            gt_labels, gt_bboxes3d, gt_kpts2d, gt_kpts2d_valid)
+        loss, loss_states = self.get_loss_from_target(
+            out_cls_scores,
+            out_bbox_preds,
+            out_dir_preds,
+            out_dim_preds,
+            out_depth_preds,
+            decoded_c3d, decoded_bboxes, batch_target_res
         )
         return loss_states
-    def get_bboxes(self, cls_preds, reg_preds, img_metas):
+
+    def get_bboxes(self, out_cls_scores, out_bbox_preds, out_dir_preds, out_dim_preds, out_depth_preds,
+                   out_offset2c3d_preds, img_metas, thresh=0.4):
         """Decode the outputs to bboxes.
         Args:
             cls_preds (Tensor): Shape (num_imgs, num_points, num_classes).
             reg_preds (Tensor): Shape (num_imgs, num_points, 4 * (regmax + 1)).
-            img_metas (dict): Dict of image info.
+            img_metas (list): list of batch image info.
 
         Returns:
             results_list (list[tuple]): List of detection bboxes and labels.
         """
-        device = cls_preds.device
-        b = cls_preds.shape[0]
-        input_height, input_width = img_metas["img"].shape[2:]
+        device = out_cls_scores.device
+        batch_size = out_cls_scores.shape[0]
+        input_height, input_width = img_metas[0]["img_shape"][:2]
         input_shape = (input_height, input_width)
 
         featmap_sizes = [
@@ -271,50 +393,58 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
             for stride in self.strides
         ]
         # get grid cells of one image
-        mlvl_center_priors = [
-            self.get_single_lvl_ltcenter_priors(
-                b,
-                featmap_sizes[i],
-                stride,
-                dtype=torch.float32,
-                device=device,
-            )
-            for i, stride in enumerate(self.strides)
-        ]
-        center_priors = torch.cat(mlvl_center_priors, dim=1)
-        dis_preds = self.integral(reg_preds) * center_priors[..., 2, None]
-        bboxes = distance2bbox(center_priors[..., :2], dis_preds, max_shape=input_shape)
-        scores = cls_preds
+        multi_lvl_ltcenter_priors = self.get_multi_lvl_ltcenter_priors(batch_size, featmap_sizes, self.strides,
+                                                                       dtype=torch.float32,
+                                                                       device=device)
+        # TODO transform 3dbox after 2dnms
+        dis_preds = self.integral(out_bbox_preds) * multi_lvl_ltcenter_priors[..., 2, None]
+        decoded_bboxes = distance2bbox(multi_lvl_ltcenter_priors[..., :2], dis_preds, max_shape=input_shape)
+        # decoded_bboxes = out_bbox_preds
+        decoded_c3d = multi_lvl_ltcenter_priors[..., :2] + out_offset2c3d_preds * multi_lvl_ltcenter_priors[
+            ..., 2, None]
+        # decoded_c3d = out_offset2c3d_preds
+        out_dir_preds = torch.atan2(out_dir_preds[..., 0:1], out_dir_preds[..., 1:])
+        out_bbox3d_preds = torch.cat([decoded_c3d, out_depth_preds[..., 0:1], out_dim_preds, out_dir_preds], dim=-1)
+
         result_list = []
-        for i in range(b):
+        for i in range(batch_size):
             # add a dummy background class at the end of all labels
             # same with mmdetection2.0
-            score, bbox = scores[i], bboxes[i]
+            score, bbox, bbox3d = out_cls_scores[i], decoded_bboxes[i], out_bbox3d_preds[i]
             padding = score.new_zeros(score.shape[0], 1)
             score = torch.cat([score, padding], dim=1)
-            results = multiclass_nms(
+            bbox, cls, inds = multiclass_nms(
                 bbox,
                 score,
-                score_thr=0.05,
+                score_thr=thresh,
                 nms_cfg=dict(type="nms", iou_threshold=0.6),
                 max_num=100,
+                return_inds=True
             )
-            result_list.append(results)
+            bbox3d = bbox3d[:, None, :].expand(bbox3d.size(0), self.num_classes, self.bbox3d_code_size).reshape(-1,
+                                                                                                                self.bbox3d_code_size)[
+                inds]
+            bbox3d = self.decode_bbox3d(bbox3d, img_metas[i]['cam2img'])
+            bbox3d = CameraInstance3DBoxes(bbox3d,box_dim=self.bbox3d_code_size, origin=(0.5, 0.5, 0.5))
+            result_list.append([bbox, cls, bbox3d])
         return result_list
 
-    def get_targets(self,cls_preds,multi_lvl_ltcenter_priors,decoded_bboxes,gt_bboxes,gt_labels):
+    def get_targets(self, cls_preds, multi_lvl_ltcenter_priors, decoded_bboxes, gt_bboxes, gt_labels, gt_bboxes3d,
+                    gt_kpts2d, gt_kpts2d_valid):
         batch_assign_res = multi_apply(
             self.target_assign_single_img,
             cls_preds.detach(),
             multi_lvl_ltcenter_priors,
             decoded_bboxes.detach(),
             gt_bboxes,
-            gt_labels,
+            gt_labels, gt_bboxes3d, gt_kpts2d, gt_kpts2d_valid
         )
         return batch_assign_res
+
     @torch.no_grad()
     def target_assign_single_img(
-            self, cls_preds, center_priors, decoded_bboxes, gt_bboxes, gt_labels
+            self, cls_preds, center_priors, decoded_bboxes, gt_bboxes, gt_labels, gt_bboxes3d, gt_kpts2d,
+            gt_kpts2d_valid,
     ):
         """Compute classification, regression, and objectness targets for
         priors in a single image.
@@ -338,45 +468,88 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
         gt_labels = torch.asarray(gt_labels).to(device)
         num_gts = gt_labels.size(0)
         gt_bboxes = gt_bboxes.to(decoded_bboxes.dtype)
+        if not isinstance(gt_bboxes3d, torch.Tensor):
+            gt_bboxes3d = gt_bboxes3d.tensor.to(gt_bboxes.device)
 
-        bbox_targets = torch.zeros_like(center_priors)
-        dist_targets = torch.zeros_like(center_priors)
-        labels = center_priors.new_full(
+        single_img_labels = center_priors.new_full(
             (num_priors,), self.num_classes, dtype=torch.long
         )
-        label_scores = center_priors.new_zeros(labels.shape, dtype=torch.float)
+        single_img_label_scores = center_priors.new_zeros(single_img_labels.shape, dtype=torch.float)
+        single_img_bbox_targets = torch.empty((0, 4))
+        single_img_bbox3d_targets = torch.empty((0, 7))
+        single_img_kpts2d_targets = torch.empty((0, 9, 2))
+        single_img_kpts2d_valid_targets = torch.empty((0, 9))
+        single_img_pos_inds = torch.empty((0))
         # No target
         if num_gts == 0:
-            return labels, label_scores, bbox_targets, dist_targets, 0
+            return single_img_labels, single_img_label_scores, single_img_bbox_targets, single_img_bbox3d_targets, \
+                   single_img_kpts2d_targets, single_img_kpts2d_valid_targets, single_img_pos_inds
 
         assign_result = self.assigner.assign(
             cls_preds, center_priors, decoded_bboxes, gt_bboxes, gt_labels
         )
-        pos_inds, neg_inds, pos_gt_bboxes, pos_assigned_gt_inds = self.sample(
-            assign_result, gt_bboxes
+        pos_inds, neg_inds, pos_gt_bboxes, pos_gt_bboxes3d, pos_gt_kpts2d, pos_gt_kpts2d_valid, pos_assigned_gt_inds = self.sample(
+            assign_result, gt_bboxes, gt_bboxes3d, gt_kpts2d, gt_kpts2d_valid
         )
         num_pos_per_img = pos_inds.size(0)
         pos_ious = assign_result.max_overlaps[pos_inds]
-
         if len(pos_inds) > 0:
-            bbox_targets[pos_inds, :] = pos_gt_bboxes
-            dist_targets[pos_inds, :] = (
-                    bbox2distance(center_priors[pos_inds, :2], pos_gt_bboxes)
-                    / center_priors[pos_inds, None, 2]
-            )
-            dist_targets = dist_targets.clamp(min=0, max=self.reg_max - 0.1)
-            labels[pos_inds] = gt_labels[pos_assigned_gt_inds]
-            label_scores[pos_inds] = pos_ious
-        return (
-            labels,
-            label_scores,
-            bbox_targets,
-            dist_targets,
-            num_pos_per_img,
-        )
+            single_img_bbox_targets = pos_gt_bboxes
+            single_img_dist_targets = (bbox2distance(center_priors[pos_inds, :2], pos_gt_bboxes) / center_priors[
+                pos_inds, None, 2]).clamp(min=0, max=self.reg_max - 0.1)
+            single_img_labels[pos_inds] = gt_labels[pos_assigned_gt_inds]
+            single_img_label_scores[pos_inds] = pos_ious
+            # single_img_label_scores3d = pos_ious#3d iou
+            single_img_bbox3d_targets = pos_gt_bboxes3d
+            single_img_kpts2d_targets = pos_gt_kpts2d
+            single_img_kpts2d_valid_targets = pos_gt_kpts2d_valid
+            single_img_pos_inds = pos_inds
+        return single_img_labels, single_img_label_scores, single_img_bbox_targets, single_img_dist_targets, \
+               single_img_bbox3d_targets, single_img_kpts2d_targets, single_img_kpts2d_valid_targets, single_img_pos_inds
+
+    def decode_bbox3d(self, bbox3d, cam2img):
+        # 1. alpha -> roty
+        bbox3d[:, 6] = (bbox3d[:, 6] + torch.atan2(bbox3d[:, 0] - cam2img[0, 2], cam2img[0, 0]) + PI) % (PI * 2) - PI
+        # 2. 2d+depth -> 3d
+        bbox3d[:, :3] = self.pts2Dto3D(bbox3d[:, :3], cam2img)
+        return bbox3d
+
+    @staticmethod
+    def pts2Dto3D(points, cam2img):
+        """
+        Args:
+            points (torch.Tensor): points in 2D images, [N, 3], \
+                3 corresponds with x, y in the image and depth.
+            cam2img (torch.Tensor): camera instrinsic, [3, 3]
+
+        Returns:
+            torch.Tensor: points in 3D space. [N, 3], \
+                3 corresponds with x, y, z in 3D space.
+        """
+        # assert view.shape[0] <= 4
+        # assert view.shape[1] <= 4
+        # assert points.shape[1] == 3
+        # cam2img = cam2img
+        points2D = points[:, :2]
+        depths = points[:, 2:]  # .view(-1, 1)
+        unnorm_points2D = torch.cat([points2D * depths, depths], dim=1)
+
+        cam2img_mono = torch.nn.functional.pad(cam2img, (0, 1, 0, 1))
+        cam2img_mono[3, 3] = 1.
+        # viewpad[:view.shape[0], :view.shape[1]] = points2D.new_tensor(view)
+        inv_cam2img_mono = torch.inverse(cam2img_mono).permute(1, 0).to(points.device)
+        # inv_cam2img_mono = torch.linalg.inv(cam2img_mono).permute(1, 0)
+        # Do operation in homogenous coordinates.
+        nbr_points = unnorm_points2D.shape[0]
+        homo_points2D = torch.cat(
+            [unnorm_points2D,
+             points2D.new_ones((nbr_points, 1))], dim=1).view(-1, 1, 4)  #
+        points3D = (homo_points2D @ inv_cam2img_mono).view(-1, 4)[:, :3]
+
+        return points3D
 
     def get_single_lvl_ltcenter_priors(
-        self, batch_size, featmap_size, stride, dtype, device
+            self, batch_size, featmap_size, stride, dtype, device
     ):
         """Generate centers of a single stage feature map.
         Args:
@@ -397,7 +570,8 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
         strides = x.new_full((x.shape[0],), stride)
         proiors = torch.stack([x, y, strides, strides], dim=-1)
         return proiors.unsqueeze(0).repeat(batch_size, 1, 1)
-    def get_multi_lvl_ltcenter_priors(self,batch_size,featmap_sizes,strides,dtype,device):
+
+    def get_multi_lvl_ltcenter_priors(self, batch_size, featmap_sizes, strides, dtype, device):
         '''
 
         Args:
@@ -422,17 +596,18 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
         ]
         multi_lvl_ltcenter_priors = torch.cat(multi_lvl_ltcenter_priors, dim=1)
         return multi_lvl_ltcenter_priors
-    def sample(self, assign_result, gt_bboxes):
+
+    def sample(self, assign_result, gt_bboxes, gt_bboxes3d, gt_kpts2d, gt_kpts2d_valid):
         """Sample positive and negative bboxes."""
         pos_inds = (
             torch.nonzero(assign_result.gt_inds > 0, as_tuple=False)
-            .squeeze(-1)
-            .unique()
+                .squeeze(-1)
+                .unique()
         )
         neg_inds = (
             torch.nonzero(assign_result.gt_inds == 0, as_tuple=False)
-            .squeeze(-1)
-            .unique()
+                .squeeze(-1)
+                .unique()
         )
         pos_assigned_gt_inds = assign_result.gt_inds[pos_inds] - 1
 
@@ -440,121 +615,92 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
             # hack for index error case
             assert pos_assigned_gt_inds.numel() == 0
             pos_gt_bboxes = torch.empty_like(gt_bboxes).view(-1, 4)
+            pos_gt_bboxes3d = torch.empty_like(gt_bboxes3d).view(-1, 7)
+            pos_gt_kpts2d = torch.empty_like(gt_kpts2d).view(-1, 18)
         else:
             if len(gt_bboxes.shape) < 2:
                 gt_bboxes = gt_bboxes.view(-1, 4)
             pos_gt_bboxes = gt_bboxes[pos_assigned_gt_inds, :]
-        return pos_inds, neg_inds, pos_gt_bboxes, pos_assigned_gt_inds
-    def _get_loss_from_assign(self, cls_preds, reg_preds, decoded_bboxes, assign):
-        device = cls_preds.device
-        labels, label_scores, bbox_targets, dist_targets, num_pos = assign
-        num_total_samples = max(
-            reduce_mean(torch.tensor(sum(num_pos)).to(device)).item(), 1.0
-        )
+            pos_gt_bboxes3d = gt_bboxes3d[pos_assigned_gt_inds, :]
+            pos_gt_kpts2d = gt_kpts2d[pos_assigned_gt_inds, :]
+            pos_gt_kpts2d_valid = gt_kpts2d_valid[pos_assigned_gt_inds, :]
+        return pos_inds, neg_inds, pos_gt_bboxes, pos_gt_bboxes3d, pos_gt_kpts2d, pos_gt_kpts2d_valid, pos_assigned_gt_inds
 
-        labels = torch.cat(labels, dim=0)
-        label_scores = torch.cat(label_scores, dim=0)
-        bbox_targets = torch.cat(bbox_targets, dim=0)
-        cls_preds = cls_preds.reshape(-1, self.num_classes)
-        reg_preds = reg_preds.reshape(-1, 4 * (self.reg_max + 1))
+    def get_loss_from_target(self, out_cls_scores, out_bbox_preds, out_dir_preds, out_dim_preds, out_depth_preds,
+                             decoded_c3d, decoded_bboxes, target):
+        device = out_cls_scores.device
+        num_priors = out_cls_scores.size(1)
+        batch_labels, batch_label_scores, batch_bbox_targets, batch_dist_targets, \
+        batch_bbox3d_targets, batch_kpts2d_targets, batch_kpts2d_valid_targets, batch_pos_inds = target
+        batch_pos_binds = torch.cat(
+            [pos_inds + num_priors * batch_id for batch_id, pos_inds in enumerate(batch_pos_inds)])
+        num_batch_pos = max(batch_pos_binds.size(0), 1.0)
+
+        batch_labels = torch.cat(batch_labels, dim=0)
+        batch_label_scores = torch.cat(batch_label_scores, dim=0)
+        batch_bbox_targets = torch.cat(batch_bbox_targets, dim=0)
+        batch_dist_targets = torch.cat(batch_dist_targets, dim=0)
+        batch_bbox3d_targets = torch.cat(batch_bbox3d_targets, dim=0)
+        batch_kpts2d_targets = torch.cat(batch_kpts2d_targets, dim=0)
+        batch_kpts2d_valid_targets = torch.cat(batch_kpts2d_valid_targets, dim=0)
+
+        out_cls_scores = out_cls_scores.reshape(-1, self.num_classes)
+        out_bbox_preds = out_bbox_preds.reshape(-1, 4 * (self.reg_max + 1))
+        out_dir_preds = out_dir_preds.reshape(-1, 2)
+        out_dim_preds = out_dim_preds.reshape(-1, 3)
+        out_depth_preds = out_depth_preds.reshape(-1, 2)
+        decoded_c3d = decoded_c3d.reshape(-1, 2)
+
         decoded_bboxes = decoded_bboxes.reshape(-1, 4)
+
         loss_qfl = self.loss_cls(
-            cls_preds, (labels, label_scores), avg_factor=num_total_samples
+            out_cls_scores, (batch_labels, batch_label_scores), avg_factor=num_batch_pos
         )
 
-        pos_inds = torch.nonzero(
-            (labels >= 0) & (labels < self.num_classes), as_tuple=False
-        ).squeeze(1)
-
-        if len(pos_inds) > 0:
-            weight_targets = cls_preds[pos_inds].detach().max(dim=1)[0]
+        if num_batch_pos > 0:
+            weight_targets = out_cls_scores[batch_pos_binds].detach().max(dim=1)[0]
             bbox_avg_factor = max(reduce_mean(weight_targets.sum()).item(), 1.0)
 
             loss_bbox = self.loss_bbox(
-                decoded_bboxes[pos_inds],
-                bbox_targets[pos_inds],
+                decoded_bboxes[batch_pos_binds],
+                batch_bbox_targets,
                 weight=weight_targets,
                 avg_factor=bbox_avg_factor,
             )
 
-            dist_targets = torch.cat(dist_targets, dim=0)
             loss_dfl = self.loss_dfl(
-                reg_preds[pos_inds].reshape(-1, self.reg_max + 1),
-                dist_targets[pos_inds].reshape(-1),
+                out_bbox_preds[batch_pos_binds].reshape(-1, self.reg_max + 1),
+                batch_dist_targets.reshape(-1),
                 weight=weight_targets[:, None].expand(-1, 4).reshape(-1),
                 avg_factor=4.0 * bbox_avg_factor,
             )
+            batch_alpha_targets = -torch.atan2(batch_bbox3d_targets[..., 0], batch_bbox3d_targets[..., 2]) + \
+                                  batch_bbox3d_targets[..., 6]
+            loss_dir = self.loss_dir(
+                out_dir_preds[batch_pos_binds].reshape(-1, 2),
+                batch_alpha_targets.reshape(-1),
+            )
+            loss_dim = self.loss_dim(
+                out_dim_preds[batch_pos_binds].reshape(-1, 3),
+                batch_bbox3d_targets[..., 3:6].reshape(-1, 3),
+                out_dim_preds[batch_pos_binds].reshape(-1, 3),
+            )
+            loss_depth = self.loss_depth(
+                out_depth_preds[batch_pos_binds].reshape(-1, 2),
+                batch_bbox3d_targets[..., 2].reshape(-1)
+            )
+            loss_offset2c3d = self.loss_offset2c3d(  # TODO reproj back to 3d and calculate loss
+                decoded_c3d[batch_pos_binds].reshape(-1, 2),
+                batch_kpts2d_targets[..., 0, :].reshape(-1, 2)
+            )
         else:
-            loss_bbox = reg_preds.sum() * 0
-            loss_dfl = reg_preds.sum() * 0
-
-        loss = loss_qfl + loss_bbox + loss_dfl
-        loss_states = dict(loss_qfl=loss_qfl, loss_bbox=loss_bbox, loss_dfl=loss_dfl)
-        return loss, loss_states
-
-if __name__ == '__main__':
-    import mmcv
-    import torch
-    from mmcv.cnn import ConvModule, DepthwiseSeparableConvModule
-
-
-    def tt_gfl_head_loss():
-        """Tests yolox head loss when truth is empty and non-empty."""
-        s = 256
-        img_metas = [{
-            'img_shape': (s, s, 3),
-            'scale_factor': 1,
-            'pad_shape': (s, s, 3)
-        }]
-        train_cfg = mmcv.Config(
-            dict(
-                assigner=dict(
-                    type='SimOTAAssigner',
-                    center_radius=2.5,
-                    candidate_topk=10,
-                    iou_weight=3.0,
-                    cls_weight=1.0))
-
-        )
-        strides = [4, 8]
-        self = MonoGFocalV2SAICHead(
-            num_classes=3,
-            in_channels=256,
-            train_cfg=train_cfg,
-            strides=strides,
-            loss_cls=dict(
-                type='QualityFocalLoss',
-                activated=True,
-                beta=2.0,
-                loss_weight=1.0),
-            loss_dfl=dict(type='DistributionFocalLoss', loss_weight=0.25),
-            reg_max=16,
-            reg_topk=4,
-            reg_channels=64,
-            add_mean=True,
-            loss_bbox=dict(type='GIoULoss', loss_weight=2.0))
-
-        feat = [
-            torch.rand(2, 256, s // feat_size, s // feat_size)
-            for feat_size in strides
-        ]
-        cls_scores, bbox_preds = self.forward(feat)
-
-        # Test that empty ground truth encourages the network to predict background
-        gt_bboxes = [
-            torch.Tensor([[23.6667, 23.8757, 238.6326, 151.8874]]),
-            torch.Tensor([[23.6667, 23.8757, 238.6326, 151.8874],[0.6667, 0.8757, 22.6326, 22.8874]]),
-        ]
-        gt_labels = [torch.LongTensor([2]),torch.LongTensor([2,1])]
-        empty_gt_losses = self.loss(cls_scores, bbox_preds,
-                                    gt_bboxes, gt_labels, img_metas)
-        print(empty_gt_losses)
-        # When there is no truth, the cls loss should be nonzero but there should
-        # be no box loss.
-        # empty_cls_loss = empty_gt_losses['loss_cls'].sum()
-        # empty_box_loss = empty_gt_losses['loss_bbox'].sum()
-        # print(empty_box_loss)
-        # print(empty_cls_loss)
-
-
-    tt_gfl_head_loss()
+            loss_bbox = out_bbox_preds.sum() * 0
+            loss_dfl = out_bbox_preds.sum() * 0
+            loss_dir = out_bbox_preds.sum() * 0
+            loss_dim = out_bbox_preds.sum() * 0
+            loss_depth = out_bbox_preds.sum() * 0
+            loss_offset2c3d = out_bbox_preds.sum() * 0
+        loss_sum = loss_qfl + loss_bbox + loss_dfl
+        loss_states = dict(loss_qfl=loss_qfl, loss_bbox=loss_bbox, loss_dfl=loss_dfl, loss_dir=loss_dir,
+                           loss_dim=loss_dim, loss_depth=loss_depth, loss_offset2c3d=loss_offset2c3d)
+        return loss_sum, loss_states

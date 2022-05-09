@@ -627,7 +627,7 @@ class MonoConSAICHead(nn.Module):
         batch_bboxes[..., -1] *= sigma
 
         center2kpt_offset = transpose_and_gather_feat(center2kpt_offset_pred, batch_index)
-        center2kpt_offset = center2kpt_offset.view(batch, k, self.num_kpt * 2)[..., -2:]
+        center2kpt_offset = center2kpt_offset.view(batch, k, self.num_kpt * 2)[..., :2]
         center2kpt_offset[..., ::2] += xs.view(batch, k, 1).expand(batch, k, 1)
         center2kpt_offset[..., 1::2] += ys.view(batch, k, 1).expand(batch, k, 1)
 

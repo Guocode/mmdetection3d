@@ -19,10 +19,11 @@ from .monocon_head import MonoConHead,MonoConHeadInference
 from .rtm3d_head import RTM3DHead
 from .densedepth_head import DenseDepthHead
 from .monoconsaic_head import MonoConSAICHead
+from .monogfocalv2saic_head import MonoGFocalV2SAICHead
 __all__ = [
     'Anchor3DHead', 'FreeAnchor3DHead', 'PartA2RPNHead', 'VoteHead',
     'SSD3DHead', 'BaseConvBboxHead', 'CenterHead', 'ShapeAwareHead',
     'BaseMono3DDenseHead', 'AnchorFreeMono3DHead', 'FCOSMono3DHead',
     'GroupFree3DHead', 'PointRPNHead', 'SMOKEMono3DHead', 'PGDHead',
-    'MonoFlexHead', 'MonoConHead','MonoConHeadInference','RTM3DHead','DenseDepthHead','MonoConSAICHead'
+    'MonoFlexHead', 'MonoConHead','MonoConHeadInference','RTM3DHead','DenseDepthHead','MonoConSAICHead','MonoGFocalV2SAICHead'
 ]
