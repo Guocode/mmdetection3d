@@ -197,7 +197,7 @@ def draw_camera_bbox3d_on_img(bboxes3d,
     assert (cam2img.shape == torch.Size([3, 3])
             or cam2img.shape == torch.Size([4, 4]))
     cam2img = cam2img.float().cpu()
-    cam2img[:, -1] = 0
+    # cam2img[:, -1] = 0
     # project to 2d to get image coords (uv)
     uv_origin = points_cam2img(points_3d, cam2img)
     uv_origin = (uv_origin - 1).round()
