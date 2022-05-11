@@ -624,7 +624,7 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
         cam2img_mono = torch.nn.functional.pad(cam2img, (0, 1, 0, 1))
         cam2img_mono[:, 3, 3] = 1.
         # viewpad[:view.shape[0], :view.shape[1]] = points2D.new_tensor(view)
-        inv_cam2img_mono = torch.inverse(cam2img_mono).permute(0, 2, 1).to(points.device)
+        inv_cam2img_mono = torch.inverse(cam2img_mono.to('cpu')).permute(0, 2, 1).to(points.device)
         # inv_cam2img_mono = torch.linalg.inv(cam2img_mono).permute(1, 0)
         # Do operation in homogenous coordinates.
         nbr_points = unnorm_points2D.shape[0]
@@ -827,7 +827,7 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
             #     # weight=weight_targets,
             #     avg_factor=bbox_avg_factor,
             # )
-            # loss_dir = out_bbox_dist_preds.sum() * 0
+            loss_dir = out_bbox_dist_preds.sum() * 0
             # loss_iou3d = self.loss_iou3d(
             #     decoded_bboxes3d,
             #     batch_bbox3d_targets,
