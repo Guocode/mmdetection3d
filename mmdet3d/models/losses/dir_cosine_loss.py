@@ -12,7 +12,8 @@ def dir_cosine_loss(pred, sincos_target):
         return pred.sum() * 0
 
     assert pred.size() == sincos_target.size()
-    loss = 1 - F.cosine_similarity(pred, sincos_target)
+    loss = torch.acos(F.cosine_similarity(pred, sincos_target))
+    # loss = 1 - F.cosine_similarity(pred, sincos_target)
     return loss
 
 
@@ -23,7 +24,7 @@ class DirCosineLoss(nn.Module):
         self.reduction = reduction
         self.loss_weight = loss_weight
 
-    def forward(self, pred, target, weight=None,avg_factor=None,reduction_override=None,**kwargs):
+    def forward(self, pred, target, weight=None, avg_factor=None, reduction_override=None, **kwargs):
         """
         Args:
             pred:
