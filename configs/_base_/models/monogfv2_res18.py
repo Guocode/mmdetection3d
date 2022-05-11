@@ -6,13 +6,15 @@ model = dict(
     neck=dict(
         type='DilatedNeck',
         in_channels=[64, 128, 256, 512],
-        out_channels=[256, 256, 256, 256],
+        out_channels=[64, 64, 64, 64],
         norm_cfg=dict(type='BN')),
     bbox_head=dict(
         type='MonoGFocalV2SAICHead',
         num_classes=3,
-        in_channels=256,
+        in_channels=64,
+        feat_channels=64,
         strides=[4, 8, 16, 32],
+        stacked_convs=1,
         loss_cls=dict(
             type='QualityFocalLoss',
             activated=True,
@@ -26,10 +28,12 @@ model = dict(
         loss_bbox=dict(type='GIoULoss', loss_weight=2.0)
     ),
     train_cfg=dict(
+        # assigner=dict(type='ATSSAssigner', topk=9)
         assigner=dict(
             type='SimOTAAssigner',
             center_radius=2.5,
-            candidate_topk=10,
+            candidate_topk=7,
             iou_weight=3.0,
-            cls_weight=1.0)),
+            cls_weight=1.0)
+    ),
     test_cfg=dict(topk=30, local_maximum_kernel=3, max_per_img=30, thresh=0.4))

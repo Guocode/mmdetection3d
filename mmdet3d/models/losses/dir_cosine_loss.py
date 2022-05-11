@@ -12,8 +12,8 @@ def dir_cosine_loss(pred, sincos_target):
         return pred.sum() * 0
 
     assert pred.size() == sincos_target.size()
-    loss = torch.acos(F.cosine_similarity(pred, sincos_target))
-    # loss = 1 - F.cosine_similarity(pred, sincos_target)
+    # loss = torch.acos(F.cosine_similarity(pred, sincos_target)) #will lead to cuda error
+    loss = 1 - F.cosine_similarity(pred, sincos_target)
     return loss
 
 
