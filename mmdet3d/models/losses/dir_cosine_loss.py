@@ -7,22 +7,23 @@ from mmdet.models.losses.utils import weighted_loss
 
 
 @weighted_loss
-def dir_cosine_loss(pred, sincos_target):
+def dir_cosine_loss(pred, sincos_target, eps=1e-6):
     if sincos_target.numel() == 0:
         return pred.sum() * 0
 
     assert pred.size() == sincos_target.size()
-    # loss = torch.acos(F.cosine_similarity(pred, sincos_target)) #will lead to cuda error
-    loss = 1 - F.cosine_similarity(pred, sincos_target)
+    loss = torch.acos(F.cosine_similarity(pred, sincos_target).clamp(-1 + eps, 1 - eps))  # will lead to cuda error
+    # loss = 1 - F.cosine_similarity(pred, sincos_target) #too small when close
     return loss
 
 
 @LOSSES.register_module()
 class DirCosineLoss(nn.Module):
-    def __init__(self, reduction='mean', loss_weight=1.0):
+    def __init__(self, reduction='mean', loss_weight=1.0, eps=1e-6):
         super(DirCosineLoss, self).__init__()
         self.reduction = reduction
         self.loss_weight = loss_weight
+        self.eps = eps
 
     def forward(self, pred, target, weight=None, avg_factor=None, reduction_override=None, **kwargs):
         """
@@ -43,6 +44,7 @@ class DirCosineLoss(nn.Module):
             weight,
             reduction=reduction,
             avg_factor=avg_factor,
+            eps=self.eps,
             **kwargs
         )
         return loss
