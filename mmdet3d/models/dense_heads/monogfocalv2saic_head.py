@@ -117,6 +117,7 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
                  add_mean=True,
                  aux_reg=False,
                  bbox3d_code_size=7,
+                 depth_exprg=9,
                  **kwargs):
 
         self.reg_max = reg_max
@@ -127,6 +128,7 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
         self.aux_reg = aux_reg
         self.bbox3d_code_size = bbox3d_code_size
         self.depth_reg_max = depth_reg_max
+        self.depth_exprg = depth_exprg
         if add_mean:
             self.total_dim += 1
         print('total dim = ', self.total_dim * 4)
@@ -219,7 +221,7 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
         self.scales3d_depth = nn.ModuleList(
             [Scale(1.0) for _ in self.strides])
         self.bias3d_depth = nn.ModuleList(
-            [Bias(0.0) for _ in self.strides])
+            [Bias(-4.0) for _ in self.strides])
         self.scales3d_offset2c3d = nn.ModuleList(
             [Scale(1.0) for _ in self.strides])
         conf_vector = [nn.Conv2d(4 * self.total_dim, self.reg_channels, 1)]
@@ -229,6 +231,7 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
         self.reg_conf = nn.Sequential(*conf_vector)
 
         self.temperature_scores3d = 1e-1
+
     def _init_canon_box_sizes(self):
         self.register_buffer('canon_box_sizes', torch.asarray(
             [[0.62806586, 0.82038497, 1.76784787],  # Pedestrian
@@ -336,7 +339,7 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
             depth_dist_pred = self.depth_reg(reg3d_feat)
             depth_pred = self.depth_intergral(
                 depth_dist_pred.permute(0, 2, 3, 1).reshape(N, H, W, 1, self.depth_reg_max + 1)).permute(0, 3, 1, 2)
-            depth_pred = self.bias3d_depth[lvlid](self.scales3d_depth[lvlid](depth_pred))
+            depth_pred = torch.exp(self.bias3d_depth[lvlid](self.scales3d_depth[lvlid](depth_pred / self.depth_reg_max * self.depth_exprg)))
             dim_pred = self.dim_reg(reg3d_feat)
             dir_pred = F.normalize(self.dir_reg(reg3d_feat), dim=1)
             # depth_pred[:, 0, :, :] = self.bias3d_depth[lvlid](self.scales3d_depth[lvlid](
@@ -570,9 +573,10 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
             single_img_bbox3d_targets = pos_gt_bboxes3d
             lvl_inds = [self.strides.index(stride) for stride in center_priors[pos_inds, 2]]
             single_img_depth_dist_targets = [
-                (pos_gt_bboxes3d[pos_ind, 2:3] - self.bias3d_depth[lvl].bias.detach()) / (self.scales3d_depth[
-                                                                                              lvl].scale.detach().abs() + EPS)
+                (torch.log(pos_gt_bboxes3d[pos_ind, 2:3].clamp(0.1, 300)) - self.bias3d_depth[lvl].bias.detach())/self.depth_exprg*self.reg_max/self.scales3d_depth[lvl].scale.detach()
+
                 for pos_ind, lvl in enumerate(lvl_inds)]
+            print(self.bias3d_depth[1].bias, self.scales3d_depth[1].scale)
             single_img_depth_dist_targets = torch.cat(single_img_depth_dist_targets).clamp(min=0,
                                                                                            max=self.depth_reg_max - 0.1)
             single_img_kpts2d_targets = pos_gt_kpts2d
@@ -737,7 +741,7 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
             [pos_inds + num_priors * batch_id for batch_id, pos_inds in enumerate(batch_pos_inds)])
         batch_pos_bids = torch.cat(
             [torch.full_like(pos_inds, batch_id) for batch_id, pos_inds in enumerate(batch_pos_inds)])
-        num_batch_pos = max(batch_pos_binds.size(0), 1.0)
+        num_batch_pos = batch_pos_binds.size(0)
 
         batch_labels = torch.cat(batch_labels, dim=0)
         batch_label_scores = torch.cat(batch_label_scores, dim=0)
@@ -758,7 +762,6 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
         decoded_bboxes = decoded_bboxes.reshape(-1, 4)
         decoded_pc3d = decoded_pc3d.reshape(-1, 2)
 
-
         if num_batch_pos > 0:
             decoded_gc3d = self.pts2Dto3D(
                 torch.cat([decoded_pc3d[batch_pos_binds], out_depth_preds[batch_pos_binds]], dim=-1),
@@ -776,7 +779,7 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
             # batch_iou3d = torch.nan_to_num(diff_iou_rotated_3d(decoded_bboxes3d[None, ...], batch_bbox3d_targets[None, ...]).squeeze(0), 0)
 
             decoded_bboxes3d_wodir = torch.cat([decoded_gc3d, out_dim_pos, batch_bbox3d_targets[:, 6:]],
-                                         dim=-1)  # not opt alpha
+                                               dim=-1)  # not opt alpha
             decoded_bboxes3d_c3d = torch.cat(
                 [decoded_gc3d_c3d, batch_bbox3d_targets[:, 3:6], batch_bbox3d_targets[:, 6:]], dim=-1)
             decoded_bboxes3d_depth = torch.cat(
@@ -785,14 +788,15 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
                                              dim=-1)
             # decoded_bboxes3d_dir = torch.cat(
             #     [batch_bbox3d_targets[:, :3], batch_bbox3d_targets[:, 3:6], out_dir_rad_pos], dim=-1)
-            print(decoded_bboxes3d[0],decoded_bboxes[batch_pos_binds][0])
-            batch_diou3d = diou_3d_loss(decoded_bboxes3d_wodir,batch_bbox3d_targets,reduction='none')
-            batch_label_scores3d = torch.exp(-batch_diou3d*self.temperature_scores3d)
-            batch_label_scores[batch_pos_binds] = batch_label_scores[batch_pos_binds]*batch_label_scores3d.detach()
+            print(decoded_bboxes3d[0], decoded_bboxes[batch_pos_binds][0])
+            batch_diou3d = diou_3d_loss(decoded_bboxes3d_wodir, batch_bbox3d_targets, reduction='none')
+            batch_label_scores3d = torch.exp(-batch_diou3d * self.temperature_scores3d)
+            batch_label_scores[batch_pos_binds] = batch_label_scores[batch_pos_binds] * batch_label_scores3d.detach()
             loss_qfl = self.loss_cls(
-                out_cls_scores, (batch_labels, batch_label_scores), avg_factor=num_batch_pos
+                out_cls_scores, (batch_labels, batch_label_scores), avg_factor=max(num_batch_pos,1)
             )
-            print(batch_label_scores[batch_pos_binds][0],batch_label_scores3d[0], out_cls_scores[batch_pos_binds][0],num_batch_pos)
+            print(batch_label_scores[batch_pos_binds][0], batch_label_scores3d[0], out_cls_scores[batch_pos_binds][0],
+                  num_batch_pos)
             weight_targets = out_cls_scores[batch_pos_binds].detach().max(dim=1)[0]
             bbox_avg_factor = max(reduce_mean(weight_targets.sum()).item(), 1.0)
             loss_bbox = self.loss_bbox(
@@ -878,7 +882,7 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
             # loss_iou3d_dir = out_bbox_dist_preds.sum() * 0
         else:
             loss_qfl = self.loss_cls(
-                out_cls_scores, (batch_labels, batch_label_scores), avg_factor=num_batch_pos
+                out_cls_scores, (batch_labels, batch_label_scores), avg_factor=max(num_batch_pos,1)
             )
             loss_bbox = out_bbox_dist_preds.sum() * 0
             loss_dfl = loss_bbox

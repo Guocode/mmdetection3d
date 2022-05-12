@@ -9,6 +9,9 @@ import torch.nn.functional as F
 from mmdet.models.builder import NECKS
 import torch
 
+from mmdet3d.models.necks.dla_neck import fill_up_weights
+
+
 class Conv(nn.Module):
     def __init__(self, c1, c2, k, s=1, p=0, d=1, g=1, act='relu'):
         super(Conv, self).__init__()

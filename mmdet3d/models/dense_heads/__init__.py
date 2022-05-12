@@ -3,6 +3,7 @@ from .anchor3d_head import Anchor3DHead
 from .anchor_free_mono3d_head import AnchorFreeMono3DHead
 from .base_conv_bbox_head import BaseConvBboxHead
 from .base_mono3d_dense_head import BaseMono3DDenseHead
+from .bev_mono3d_head import BEVMono3DHead
 from .centerpoint_head import CenterHead
 from .fcos_mono3d_head import FCOSMono3DHead
 from .free_anchor3d_head import FreeAnchor3DHead
@@ -25,5 +26,5 @@ __all__ = [
     'SSD3DHead', 'BaseConvBboxHead', 'CenterHead', 'ShapeAwareHead',
     'BaseMono3DDenseHead', 'AnchorFreeMono3DHead', 'FCOSMono3DHead',
     'GroupFree3DHead', 'PointRPNHead', 'SMOKEMono3DHead', 'PGDHead',
-    'MonoFlexHead', 'MonoConHead','MonoConHeadInference','RTM3DHead','DenseDepthHead','MonoConSAICHead','MonoGFocalV2SAICHead'
+    'MonoFlexHead', 'MonoConHead','MonoConHeadInference','RTM3DHead','DenseDepthHead','MonoConSAICHead','MonoGFocalV2SAICHead','BEVMono3DHead'
 ]
