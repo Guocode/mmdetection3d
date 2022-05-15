@@ -10,7 +10,7 @@ class HSEBlock(nn.Module):
         self.pool_func = pool_func
 
     def forward(self, x):
-        px = self.pool_func(x, (1, x.size(2)))
+        px = self.pool_func(x, (1, x.size(3)))
         x = px+x
         return x
 

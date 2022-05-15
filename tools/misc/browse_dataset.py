@@ -146,7 +146,7 @@ def show_proj_bbox_img(input, out_dir, show=False, is_nus_mono=False):
     gt_bboxes_3d = input['gt_bboxes_3d']._data
     gt_bboxes_2d = input['gt_bboxes']._data.numpy().astype(np.int32)
     kpts2d = input['kpts2d']._data.numpy().astype(np.int32)
-    centers2d = input['centers2d']._data.numpy().astype(np.int32)
+    # centers2d = input['centers2d']._data.numpy().astype(np.int32)
     img_metas = input['img_metas']._data
     img = input['img']._data.numpy()
     print(img.shape)
@@ -164,8 +164,8 @@ def show_proj_bbox_img(input, out_dir, show=False, is_nus_mono=False):
             cv2.circle(img,_kpt2d[:2],3,(0,0,255))
             cv2.putText(img, str(cid), _kpt2d[:2], cv2.FONT_HERSHEY_PLAIN, 1, (0, 255, 0), 1)
     cv2.putText(img, str(filename), (0,20), cv2.FONT_HERSHEY_PLAIN, 1, (255, 255, 255), 1)
-    for center2d in centers2d:
-        cv2.circle(img, center2d[:2], 5, (255, 0, 255))
+    # for center2d in centers2d:
+    #     cv2.circle(img, center2d[:2], 5, (255, 0, 255))
     if isinstance(gt_bboxes_3d, DepthInstance3DBoxes):
         show_multi_modality_result(
             img,

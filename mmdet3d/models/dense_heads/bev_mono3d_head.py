@@ -249,8 +249,9 @@ class BEVMono3DHead(BaseMono3DDenseHead):
             center_heatmap_pred, k=topk)
         batch_scores, batch_index, batch_topk_labels = batch_dets
         cam2imgs = torch.stack([img_meta['cam2img'] for img_meta in img_metas], dim=0).to(cls_score.device)
-        bev_ltcenterxz_priors = self.get_bev_ltcenterxz_priors(bs, self.bev_size, self.zrange, cam2imgs, cls_score.dtype,
-                                                           cls_score.device)
+        bev_ltcenterxz_priors = self.get_bev_ltcenterxz_priors(bs, self.bev_size, self.zrange, cam2imgs,
+                                                               cls_score.dtype,
+                                                               cls_score.device)
         bev_ltcenterxz_priors_pos = bev_ltcenterxz_priors.gather(1, batch_index.unsqueeze(2).repeat(1, 1, 2))
         offset_pos = offset_out.gather(1, batch_index.unsqueeze(2).repeat(1, 1, 2))
         centerxz_pos = bev_ltcenterxz_priors_pos + offset_pos
@@ -407,7 +408,7 @@ class BEVMono3DHead(BaseMono3DDenseHead):
             bev_dim_x = bev_dim_x / (self.xrange[1] - self.xrange[0]) * self.bev_size[1]
             bev_dim_z = bev_dim_z / (self.zrange[1] - self.zrange[0]) * self.bev_size[0]
             pos_ind = ((bev_ltcenterxz_priors - bev_centerxz) ** 2).sum(-1).argmin()
-            pos_ind_xz =  (pos_ind % feat_w,pos_ind // feat_w)
+            pos_ind_xz = (pos_ind % feat_w, pos_ind // feat_w)
             pos_bev_center_prior = bev_ltcenterxz_priors[pos_ind]
             radius = gaussian_radius([bev_dim_z, bev_dim_x], min_overlap=0.0)
             radius = max(0, int(radius * 2))
@@ -438,7 +439,7 @@ class BEVMono3DHead(BaseMono3DDenseHead):
              img_metas, gt_bboxes_ignore=None):
         cam2imgs = torch.stack([img_meta['cam2img'] for img_meta in img_metas], dim=0).to(cls_score.device)
         bev_ltcenterxz_priors = self.get_bev_ltcenterxz_priors(cls_score.size(0), self.bev_size, self.zrange, cam2imgs,
-                                                           cls_score.dtype, cls_score.device)
+                                                               cls_score.dtype, cls_score.device)
         decode_center_out = bev_ltcenterxz_priors + offset_out
         batch_target = self.get_targets(gt_bboxes_3d,
                                         gt_labels_3d,
@@ -509,8 +510,9 @@ class BEVMono3DHead(BaseMono3DDenseHead):
         pos_dir_rad_out = torch.atan2(pos_dir_out[:, 0:1], pos_dir_out[:, 1:])
         decoded_bboxes3d = torch.cat(
             [pos_centerxz_out[:, :1], pos_centery_out, pos_centerxz_out[:, 1:], pos_dim_out, pos_dir_rad_out], dim=-1)
-        print(decoded_bboxes3d[0])
-        print(batch_bboxes3d_target[0])
+        print(cls_score.view(-1, self.num_classes)[batch_pos_binds][0].detach().cpu().numpy().tolist())
+        print(decoded_bboxes3d[0].detach().cpu().numpy().tolist())
+        print(batch_bboxes3d_target[0].detach().cpu().numpy().tolist())
         decoded_bboxes3d_offset = torch.cat(
             [pos_centerxz_out[:, :1], batch_bboxes3d_target[:, 1:2], pos_centerxz_out[:, 1:],
              batch_bboxes3d_target[:, 3:6], batch_bboxes3d_target[:, 6:]], dim=-1)
@@ -519,26 +521,32 @@ class BEVMono3DHead(BaseMono3DDenseHead):
              batch_bboxes3d_target[:, 3:6], batch_bboxes3d_target[:, 6:]], dim=-1)
         decoded_bboxes3d_dim = torch.cat(
             [batch_bboxes3d_target[:, :3], pos_dim_out, batch_bboxes3d_target[:, 6:]], dim=-1)
-
-        loss_cls = self.loss_cls(
-            cls_score, batch_cls_score_target.view(-1, self.num_classes), avg_factor=max(num_batch_pos, 1))
-        loss_offset = self.loss_iou3d(
-            decoded_bboxes3d_offset,
-            batch_bboxes3d_target,
-        )
-        loss_centery = self.loss_iou3d(
-            decoded_bboxes3d_centery,
-            batch_bboxes3d_target,
-        )
-        loss_dim = self.loss_iou3d(
-            decoded_bboxes3d_dim,
-            batch_bboxes3d_target,
-        )
-        loss_roty = self.loss_dir(
-            pos_dir_out.reshape(-1, 2),
-            batch_roty_target.reshape(-1),
-        )
-
+        if num_batch_pos > 0:
+            loss_cls = self.loss_cls(
+                cls_score, batch_cls_score_target.view(-1, self.num_classes), avg_factor=max(num_batch_pos, 1))
+            loss_offset = self.loss_iou3d(
+                decoded_bboxes3d_offset,
+                batch_bboxes3d_target,
+            )
+            loss_centery = self.loss_iou3d(
+                decoded_bboxes3d_centery,
+                batch_bboxes3d_target,
+            )
+            loss_dim = self.loss_iou3d(
+                decoded_bboxes3d_dim,
+                batch_bboxes3d_target,
+            )
+            loss_roty = self.loss_dir(
+                pos_dir_out.reshape(-1, 2),
+                batch_roty_target.reshape(-1),
+            )
+        else:
+            loss_cls = self.loss_cls(
+                cls_score, batch_cls_score_target.view(-1, self.num_classes), avg_factor=max(num_batch_pos, 1))
+            loss_offset = cls_score.sum() * 0
+            loss_centery = cls_score.sum() * 0
+            loss_dim = cls_score.sum() * 0
+            loss_roty = cls_score.sum() * 0
         return dict(
             loss_cls=loss_cls,
             loss_offset=loss_offset,

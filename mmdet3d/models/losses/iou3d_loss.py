@@ -53,7 +53,7 @@ def diou_3d_loss(pred, target, eps=1e-6):
     ctd = torch.sum((pred[:, :3] - target[:, :3]) ** 2, dim=-1)
     cnd = torch.mean(torch.sum((corners_from_bboxes3d(pred) - corners_from_bboxes3d(target)) ** 2, dim=-1), dim=1)
     did = torch.sum(target[:, 3:6] ** 2, dim=-1)
-    loss = 1 - iou3d + (ctd + cnd) / (did + eps)
+    loss = 1 - iou3d + (ctd + cnd) / (ctd + cnd+ did + eps)
     return loss
 
 

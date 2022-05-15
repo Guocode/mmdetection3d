@@ -1,3 +1,5 @@
+import math
+
 import torch
 from torch import nn as nn
 import torch.nn.functional as F
@@ -7,14 +9,16 @@ from mmdet.models.losses.utils import weighted_loss
 
 
 @weighted_loss
-def dir_cosine_loss(pred, sincos_target, eps=1e-6):
+def dir_cosine_loss(pred, sincos_target, eps=1e-6, clip_max=math.pi * 0.5):
     if sincos_target.numel() == 0:
         return pred.sum() * 0
 
     assert pred.size() == sincos_target.size()
-    loss = torch.acos(F.cosine_similarity(pred, sincos_target).clamp(-1 + eps, 1 - eps))  # will lead to cuda error
-    # loss = 1 - F.cosine_similarity(pred, sincos_target) #too small when close
-    return loss
+    cosine_sim = F.cosine_similarity(pred, sincos_target)
+    loss = torch.acos(cosine_sim.clamp(-1 + eps, 1 - eps))  # will lead to cuda error (0,3.14)
+    # loss = 1 - cosine_sim  # too small when close (0,2)
+    # loss[loss > 1] = 0
+    return loss#.clamp(max=clip_max)
 
 
 @LOSSES.register_module()

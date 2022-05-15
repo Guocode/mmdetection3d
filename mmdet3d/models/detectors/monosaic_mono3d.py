@@ -49,7 +49,7 @@ class MonoSAIC(SingleStageDetector):
         bbox2d_img = []
         bbox_img = []
         for bbox_output in bbox_outputs:
-            bboxes, labels, bboxes3d = bbox_output
+            bboxes, bboxes3d,labels = bbox_output
             bbox2d_img.append(bbox2result(bboxes, labels, self.bbox_head.num_classes))
             bbox_img.append(bbox3d2result(bboxes3d, bboxes[..., -1], labels))
 

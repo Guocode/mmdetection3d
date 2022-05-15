@@ -1895,11 +1895,12 @@ class AffineResize3D(object):
             outside the border of the image. Defaults to True.
     """
 
-    def __init__(self, dst_size, affine_labels=True, bbox_clip_border=True):
+    def __init__(self, dst_size, affine_labels=True, bbox_clip_border=True, filter_bbox=True):
 
         self.dst_size = dst_size
         self.affine_labels = affine_labels
         self.bbox_clip_border = bbox_clip_border
+        self.filter_bbox =filter_bbox
 
     def __call__(self, results):
         """Call function to do affine transform to input image and labels.
@@ -1943,10 +1944,17 @@ class AffineResize3D(object):
         if self.bbox_clip_border:
             results['gt_bboxes'][:, ::2] = np.clip(results['gt_bboxes'][:, ::2], a_min=0, a_max=self.dst_size[0])
             results['gt_bboxes'][:, 1::2] = np.clip(results['gt_bboxes'][:, 1::2], a_min=0, a_max=self.dst_size[1])
-        gt_bboxes_wh = (results['gt_bboxes'][:, ::2] - results['gt_bboxes'][:, 1::2])
-        gt_bboxes_valid = (gt_bboxes_wh > 3).all(-1) * (gt_bboxes_wh[:, 0] / gt_bboxes_wh[:, 1] < 15) * (
-                gt_bboxes_wh[:, 0] / gt_bboxes_wh[:, 1] > 1 / 15)
-        results['gt_bboxes'] = results['gt_bboxes'][gt_bboxes_valid]
+        gt_bboxes_wh = results['gt_bboxes'][:, 2:]-results['gt_bboxes'][:, :2]
+        if self.filter_bbox:
+            gt_bboxes_valid = (gt_bboxes_wh.min(-1) > 10)* (gt_bboxes_wh[:, 0] / gt_bboxes_wh[:, 1] < 10) * (
+                    gt_bboxes_wh[:, 0] / gt_bboxes_wh[:, 1] > 1 / 10)
+            results['gt_bboxes'] = results['gt_bboxes'][gt_bboxes_valid]
+            results['gt_bboxes_3d'] = results['gt_bboxes_3d'][gt_bboxes_valid]
+            results['gt_labels'] = results['gt_labels'][gt_bboxes_valid]
+            results['gt_labels_3d'] = results['gt_labels_3d'][gt_bboxes_valid]
+            results['centers2d'] = results['centers2d'][gt_bboxes_valid]
+            results['kpts2d'] = results['kpts2d'][gt_bboxes_valid]
+            results['kpts2d_valid'] = results['kpts2d_valid'][gt_bboxes_valid]
         results['centers2d'] *= get_matrix[0, 0]
         results['centers2d'] += get_matrix[:, 2]
         results['kpts2d'] *= get_matrix[0, 0]
