@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from mmdet.models import GaussianFocalLoss
 from mmdet.models.losses import FocalLoss, SmoothL1Loss, binary_cross_entropy, GIoULoss, QualityFocalLoss, \
-    DistributionFocalLoss,CrossEntropyLoss
+    DistributionFocalLoss,CrossEntropyLoss,VarifocalLoss
 from .axis_aligned_iou_loss import AxisAlignedIoULoss, axis_aligned_iou_loss
 from .chamfer_distance import ChamferDistance, chamfer_distance
 from .multibin_loss import MultiBinLoss
@@ -21,5 +21,5 @@ __all__ = [
     'MultiBinLoss', 'CenterNetGaussianFocalLoss', 'DimAwareL1Loss', 'LaplacianAleatoricUncertaintyLoss',
     'GaussianAleatoricUncertaintyLoss', 'GIoULoss', 'QualityFocalLoss', 'DistributionFocalLoss',
     'RTM3DFocalLoss', 'RegWeightedL1Loss', 'RegL1Loss', 'BinRotLoss', 'Position_loss', 'DirCosineLoss', 'IOU3DLoss',
-    'DIOU3DLoss', 'GaussianFocalLoss','CrossEntropyLoss'
+    'DIOU3DLoss', 'GaussianFocalLoss','CrossEntropyLoss','VarifocalLoss'
 ]

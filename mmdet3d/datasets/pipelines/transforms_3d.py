@@ -1946,7 +1946,7 @@ class AffineResize3D(object):
             results['gt_bboxes'][:, 1::2] = np.clip(results['gt_bboxes'][:, 1::2], a_min=0, a_max=self.dst_size[1])
         gt_bboxes_wh = results['gt_bboxes'][:, 2:]-results['gt_bboxes'][:, :2]
         if self.filter_bbox:
-            gt_bboxes_valid = (gt_bboxes_wh.min(-1) > 10)* (gt_bboxes_wh[:, 0] / gt_bboxes_wh[:, 1] < 10) * (
+            gt_bboxes_valid = (gt_bboxes_wh.min(-1) > 5)* (gt_bboxes_wh[:, 0] / gt_bboxes_wh[:, 1] < 10) * (
                     gt_bboxes_wh[:, 0] / gt_bboxes_wh[:, 1] > 1 / 10)
             results['gt_bboxes'] = results['gt_bboxes'][gt_bboxes_valid]
             results['gt_bboxes_3d'] = results['gt_bboxes_3d'][gt_bboxes_valid]

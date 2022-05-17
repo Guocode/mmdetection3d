@@ -5,7 +5,7 @@ optimizer = dict(
     betas=(0.95, 0.99),
     weight_decay=0.00001,
     paramwise_cfg=dict(bias_lr_mult=2., norm_decay_mult=0., bias_decay_mult=0.))
-optimizer_config = dict(grad_clip=dict(max_norm=0.1, norm_type=2))
+optimizer_config = dict(grad_clip=dict(max_norm=30, norm_type=2))
 
 lr_config = dict(
     policy='cyclic',

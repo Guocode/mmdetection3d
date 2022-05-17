@@ -14,13 +14,13 @@ model = dict(
     neck=dict(
         type='DilatedNeck',
         in_channels=[64, 128, 256, 512],
-        out_channels=[64, 64, 64, 64],
+        out_channels=[64, 128, 64, 64],
         norm_cfg=dict(type='BN')),
     bbox_head=dict(
         type='BEVDNDETRMono3DHead',
-        num_classes=3,
-        in_channels=64,
-        feat_channels=64,
+        num_classes=1,
+        in_channels=128,
+        feat_channels=128,
         stacked_convs=3,
     ),
     train_cfg=dict(

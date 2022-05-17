@@ -2,9 +2,7 @@
 import math
 import torch
 from mmcv.cnn import ConvModule, normal_init, bias_init_with_prob
-from mmcv.runner import force_fp32
 from mmdet.core import multi_apply, build_assigner, build_sampler
-from mmdet.models.utils import SinePositionalEncoding
 from torch import nn
 from torch.nn import functional as F
 
@@ -104,7 +102,7 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
     def __init__(self,
                  num_classes,
                  in_channels,
-                 feat_channels=128,
+                 feat_channels=256,
                  stacked_convs=3,
                  # loss_cls=dict(type='CrossEntropyLoss', loss_weight=1.0),
                  loss_cls=dict(type='FocalLoss', loss_weight=1.0),
@@ -118,10 +116,10 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
                  group_reg_dims=(3, 3, 2),  # xyz:3,dim:3,rotysincos:2
                  xrange=(-40., 40.),
                  yrange=(-0.94, 3.00),
-                 zrange=(0.3, 60.),
+                 zrange=(0.3, 100.),
                  bev_prior_size=(64, 64),
                  num_query=100,
-                 bev_transformer_chn=None,
+                 bev_transformer_chn=128,
                  bev_transformer_kernel_s=9,
                  bev_transformer_convs_num=3,
                  train_cfg=None,
@@ -141,15 +139,13 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         self.conv_bias = conv_bias
         self.conv_cfg = conv_cfg
         self.norm_cfg = norm_cfg
-        self.xrange = (-zrange[1]*640/710,zrange[1]*640/710)#xrange
-        self.xrange_min = (-zrange[0]*640/710,zrange[0]*640/710)#xrange
-
+        self.xrange = xrange
         self.yrange = yrange
         self.zrange = zrange
-        self.register_buffer('xyzrange', torch.asarray([xrange, yrange, zrange,self.xrange_min], dtype=torch.float32))  # (3,2)
+        self.register_buffer('xyzrange', torch.asarray([xrange, yrange, zrange], dtype=torch.float32))  # (3,2)
         self.bev_prior_size = bev_prior_size
         self.num_query = num_query
-        self.bev_transformer_chn = feat_channels if bev_transformer_chn is None else bev_transformer_chn
+        self.bev_transformer_chn = bev_transformer_chn
         self.bev_transformer_convs_num = bev_transformer_convs_num
         self.bev_transformer_kernel_s = bev_transformer_kernel_s
         self.bg_cls_weight = bg_cls_weight
@@ -172,43 +168,35 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
     def _init_layers(self):
         """Initialize layers of the head."""
         self.bev_transformer = ConvBEVTransformer(in_channels=self.in_channels,
-                                                  out_channels=self.feat_channels,
+                                                  out_channels=self.in_channels,
                                                   feat_channels=self.bev_transformer_chn,
                                                   stacked_bev_convs_num=self.bev_transformer_convs_num,
                                                   kernel_s=self.bev_transformer_kernel_s,
                                                   )
         self._init_clsreg_convs()
-        # self._init_clsreg_dnconvs()
-        # bev_cls_query = torch.normal(0., 0.001, (1, 10, 10, self.cls_out_channels))
-        # bev_reg_query = self.get_bev_priors(1, (10, 10), self.zrange, 1280 / 710, torch.float32, 'cpu')
-        # bev_query = torch.cat([bev_cls_query, bev_reg_query], dim=-1).permute(0, 3, 1, 2)
-        # bev_query = torch.zeros(1, 10, 10)
-        # self.posenc = SinePositionalEncoding(self.feat_channels // 2, normalize=True, offset=-0.5)
-        # self.bev_query = nn.Parameter(bev_query, requires_grad=True)
-        # self.bev_emb = nn.Embedding(self.num_query,self.feat_channels)
-
+        self._init_clsreg_dnconvs()
+        bev_cls_query = torch.normal(0., 0.001, (1, 10, 10, self.cls_out_channels))
+        bev_reg_query = self.get_bev_priors(1, (10, 10), self.zrange, 1280 / 710, torch.float32, 'cpu')
+        bev_query = torch.cat([bev_cls_query, bev_reg_query], dim=-1).permute(0, 3, 1, 2)
+        self.bev_query = nn.Parameter(bev_query, requires_grad=True)
         self.bev_enc = nn.Sequential(
-            ConvModule(
+            nn.Conv2d(
                 self.feat_channels,
                 self.feat_channels,
-                3,
-                padding=1
+                1
             ),
-            nn.Dropout(p=0.2),
-            ConvModule(
+            nn.Sigmoid(),
+            nn.Conv2d(
                 self.feat_channels,
-                self.feat_channels,
-                3,
-                padding=1
-            ),
+                self.cls_out_channels + self.reg_out_channels,
+                1
+            )
         )
-        self.ffn = nn.Conv2d(self.feat_channels, self.cls_out_channels + self.reg_out_channels, 1)
         self.init_weights()
-
     def _init_clsreg_convs(self):
         """Initialize classification conv layers of the head."""
         clsreg_convs = nn.ModuleList()
-        chout = self.feat_channels
+        chout = self.in_channels
         for i in range(self.stacked_convs):
             chin = chout
             chout = self.feat_channels
@@ -225,9 +213,33 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
                     bias=self.conv_bias),
             )
             clsreg_convs.append(
-                CBAMBlock("FC", 3, channels=chout, ratio=chout // 4)
+                CBAMBlock("FC", 5, channels=chout, ratio=chout // 4)
             )
         self.clsreg_convs = nn.Sequential(*clsreg_convs)
+
+    def _init_clsreg_dnconvs(self):
+        """Initialize classification conv layers of the head."""
+        clsreg_dnconvs = nn.ModuleList()
+        chout = self.in_channels
+        for i in range(self.stacked_convs):
+            chin = chout
+            chout = self.feat_channels
+            conv_cfg = self.conv_cfg
+            clsreg_dnconvs.append(
+                ConvModule(
+                    chin,
+                    chout,
+                    3,
+                    stride=1,
+                    padding=1,
+                    conv_cfg=conv_cfg,
+                    norm_cfg=self.norm_cfg,
+                    bias=self.conv_bias),
+            )
+            clsreg_dnconvs.append(
+                CBAMBlock("FC", 5, channels=chout, ratio=chout // 4)
+            )
+        self.clsreg_dnconvs = clsreg_dnconvs
 
     def init_weights(self):
         """Initialize weights of the head.
@@ -237,10 +249,10 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         conv_offset.weight, which mistakenly affects the training stability.
         """
         for bev_enc in self.bev_enc:
-            normal_init(bev_enc, std=0.00001, bias=0.00001)
+            normal_init(bev_enc, std=0.00001,bias=0.00001)
         for conv_cls in self.clsreg_convs:
             normal_init(conv_cls, std=0.01)
-        normal_init(self.ffn, std=0.0001, bias=0.0001)
+
         # for conv_reg in self.reg_convs:
         #     normal_init(conv_reg, std=0.01)
 
@@ -271,66 +283,44 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
             raise NotImplementedError
 
     def forward(self, feats):
-        feats_singlelvl = feats[0]#
+        feats_singlelvl = feats[0]
         bev_feats = self.bev_transformer(feats_singlelvl)
-        bev_feats = F.adaptive_avg_pool2d(bev_feats, (10,10))
+        bev_feats = F.adaptive_avg_pool2d(bev_feats, self.bev_query.shape[2:])
         b, c, h, w = bev_feats.shape
-        # bev_query = self.posenc(self.bev_query).expand((b, -1, h, w))
-        bev_query = torch.sigmoid(bev_feats)
+        bev_query = self.bev_query.expand((b, -1, h, w))
         for clsreg_conv in self.clsreg_convs:
-            bev_query = bev_query + self.bev_enc(clsreg_conv(bev_query))
-        bev_query = self.ffn(bev_query)
+            bev_query = bev_query + self.bev_enc(clsreg_conv(bev_feats))
         cls_reg_out = bev_query.view(b, -1, self.num_query).permute(0, 2, 1)
         cls_out, reg_out = cls_reg_out[..., :self.cls_out_channels], cls_reg_out[..., self.cls_out_channels:]
         b, nq, c = cls_out.shape
         cls_out = cls_out.view(b, self.num_query, self.num_classes + 1)
         b, nq, c = reg_out.shape
         reg_out = reg_out.view(b, self.num_query, sum(self.group_reg_dims))
-        reg_xyz_out = self.sigmoidxyz2xyzrange(torch.sigmoid(reg_out[..., 0:3]))  # (-1,1)
-        reg_dim_out = (torch.sigmoid(reg_out[..., 3:6])*3).clamp(0.3, 3)  # (0,2)
-        reg_roty_out = F.normalize(torch.tanh(reg_out[..., 6:8]), dim=-1)
+        reg_xyz_out = self.sigmoidxyz2xyzrange(reg_out[..., 0:3].clamp(1e-3,1-1e-3))  # (-1,1)
+        reg_dim_out = reg_out[..., 3:6].clamp(1e-3,3) # (0,2)
+        reg_roty_out = F.normalize(reg_out[..., 6:8], dim=-1)
         regs_out = torch.cat([reg_xyz_out, reg_dim_out, reg_roty_out], dim=-1)
         return cls_out, regs_out
 
     def _init_canon_box_sizes(self):
-        canon = torch.asarray(
-            [[1.61876949, 3.89154523, 1.52969237],  # Car
-             [0.62806586, 0.82038497, 1.76784787],  # Pedestrian
+        self.register_buffer('canon_box_sizes', torch.asarray(
+            [[0.62806586, 0.82038497, 1.76784787],  # Pedestrian
              [0.56898187, 1.77149234, 1.7237099],  # Cyclist
+             [1.61876949, 3.89154523, 1.52969237],  # Car
              [1.9134491, 5.15499603, 2.18998422],  # Van
              [2.61168401, 9.22692319, 3.36492722],  # Truck
              [0.5390196, 1.08098042, 1.28392158],  # Person_sitting
              [2.36044838, 15.56991038, 3.5289238],  # Tram
              [1.24489164, 2.51495357, 1.61402478],  # Misc
-             ])[:, [1, 2, 0]]
-        # self.register_buffer('canon_box_sizes', )
-        self.canon_box_sizes = nn.Parameter(canon)
+             ])[:, [1, 2, 0]])
+    def sigmoidxyz2xyzrange(self,xyz):
+        #xyz: B,N,3
+        return xyz*(self.xyzrange[:, 1] - self.xyzrange[:, 0])[None,None]+self.xyzrange[:, 0][None,None]
 
-    def sigmoidxyz2xyzrange(self, sigmoidxyz):
-        # xyz: B,N,3
-        shape = sigmoidxyz.shape
-        sigmoidxyz = sigmoidxyz.reshape(-1,3)
-        yr = sigmoidxyz[:,1:2]*(self.xyzrange[1:2, 1] - self.xyzrange[1:2, 0])[None]+self.xyzrange[1:2, 0][None]
-        zr = sigmoidxyz[:,2:3]*(self.xyzrange[2:3, 1] - self.xyzrange[2:3, 0])[None]+self.xyzrange[2:3, 0][None]
-        cxr = self.xyzrange[3][None]+(self.xyzrange[0]-self.xyzrange[3])[None]*sigmoidxyz[:,2:3]
-        xr = sigmoidxyz[:,0:1]*(cxr[:,1:2]-cxr[:,0:1]) + cxr[:,0:1]
-        xyzr = torch.cat([xr,yr,zr],dim=-1)
-        xyzr = xyzr.reshape(*shape)
-        return xyzr#xyz * (self.xyzrange[:3, 1] - self.xyzrange[:3, 0])[None, None] + self.xyzrange[:3, 0][None, None]
+    def xyzrange2sigmoidxyz(self,xyzrange):
+        #xyz: N,3
+        return (xyzrange-self.xyzrange[:, 0][None])/(self.xyzrange[:, 1] - self.xyzrange[:, 0])[None]
 
-    def xyzrange2sigmoidxyz(self, xyzrange):
-        # xyz: N,3
-        shape = xyzrange.shape
-        xyzrange = xyzrange.reshape(-1,3)
-        ys = (xyzrange[:,1:2]-self.xyzrange[1:2, 0][None])/ (self.xyzrange[1:2, 1] - self.xyzrange[1:2, 0])[None]
-        zs = (xyzrange[:,2:3]-self.xyzrange[2:3, 0][None])/ (self.xyzrange[2:3, 1] - self.xyzrange[2:3, 0])[None]
-        cxr = self.xyzrange[3][None]+(self.xyzrange[0]-self.xyzrange[3])[None]*zs
-        xs = (xyzrange[:,0:1] - cxr[:,0:1])/(cxr[:,1:2]-cxr[:,0:1])
-        xyzs = torch.cat([xs, ys, zs], dim=-1)
-        xyzs = xyzs.reshape(*shape)
-        return xyzs#(xyzrange - self.xyzrange[:, 0][None]) / (self.xyzrange[:, 1] - self.xyzrange[:, 0])[None]
-
-    @force_fp32(apply_to=('cls_out', 'reg_out'))
     def get_bboxes(self, cls_out, reg_out, img_metas, rescale=None):
         result_list = []
         for img_id in range(len(img_metas)):
@@ -341,13 +331,10 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
 
             bboxes3d = reg_out[img_id][pos_idx]
             bboxes3d_dim = bboxes3d[:, 3:6] * self.canon_box_sizes[labels]
-            bboxes3d = torch.cat([bboxes3d[:, :3], bboxes3d_dim, torch.atan2(bboxes3d[:, 6:7], bboxes3d[:, 7:8])],
-                                 dim=-1)
+            bboxes3d = torch.cat([bboxes3d[:, :3],bboxes3d_dim, torch.atan2(bboxes3d[:, 6:7], bboxes3d[:, 7:8])], dim=-1)
             bboxes3d = CameraInstance3DBoxes(bboxes3d, box_dim=7, origin=(0.5, 1.0, 0.5))
-            bboxes2d = torch.cat(
-                [torch.zeros((scores.size(0), 4), dtype=scores.dtype, device=scores.device), scores.view(-1, 1)],
-                dim=-1)
-            result_list.append((bboxes2d, bboxes3d, labels))
+            bboxes2d = torch.cat([torch.zeros((scores.size(0),4),dtype=scores.dtype,device=scores.device),scores.view(-1,1)],dim=-1)
+            result_list.append((bboxes2d,bboxes3d, labels))
         return result_list
 
     def get_targets(self, cls_out, reg_out, decode_bboxes3d, gt_bboxes_3d, gt_labels_3d, img_metas):
@@ -369,7 +356,7 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         #     gt_labels_3d,
         #     img_metas
         # )
-        return batch_targets_res  # + batch_dntargets_res
+        return batch_targets_res #+ batch_dntargets_res
 
     @torch.no_grad()
     def get_targets_single_img(self, cls_out, reg_out, decode_bboxes3d, gt_bboxes_3d, gt_labels_3d, img_meta):
@@ -377,42 +364,39 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         device = cls_out.device
         if isinstance(gt_bboxes_3d, CameraInstance3DBoxes):  # target bbox3d with gravity center and alpha
             gt_bboxes_3d = gt_bboxes_3d.tensor.to(device)
-        gt_bboxes_3d_ass_xyz = self.xyzrange2sigmoidxyz(gt_bboxes_3d[:, :3]).clamp(0,1)
-        gt_bboxes_3d_ass_xyz = torch.cat(
-            [gt_bboxes_3d_ass_xyz[:, :1], gt_bboxes_3d_ass_xyz[:, 1:2] - gt_bboxes_3d_ass_xyz[:, 1:2],
-             gt_bboxes_3d_ass_xyz[:, 2:3]], dim=-1)
-        gt_bboxes_3d_ass_dim = gt_bboxes_3d[:, 3:6] / gt_bboxes_3d[:, 3:6] / 60
+        gt_bboxes_3d_ass_xyz = self.xyzrange2sigmoidxyz(gt_bboxes_3d[:, :3])
+        gt_bboxes_3d_ass_xyz = torch.cat([gt_bboxes_3d_ass_xyz[:, :1],gt_bboxes_3d_ass_xyz[:, 1:2]-gt_bboxes_3d_ass_xyz[:, 1:2],gt_bboxes_3d_ass_xyz[:, 2:3]],dim=-1)
+        gt_bboxes_3d_ass_dim = gt_bboxes_3d[:, 3:6]/gt_bboxes_3d[:, 3:6]/60
         gt_bboxes_3d_ass_roty = gt_bboxes_3d[:, 6:] - gt_bboxes_3d[:, 6:]
         gt_bboxes_3d_ass = torch.cat([gt_bboxes_3d_ass_xyz, gt_bboxes_3d_ass_dim, gt_bboxes_3d_ass_roty], dim=-1)
 
-        decode_ass_xyz = self.xyzrange2sigmoidxyz(decode_bboxes3d[:, :3]).clamp(0,1)
-        decode_ass_xyz = torch.cat(
-            [decode_ass_xyz[:, :1], decode_ass_xyz[:, 1:2] - decode_ass_xyz[:, 1:2], decode_ass_xyz[:, 2:3]], dim=-1)
-        decode_ass_dim = decode_bboxes3d[:, 3:6] / decode_bboxes3d[:, 3:6] / 60  # / 30  # / decode_bboxes3d[:, 3:6]
+        decode_ass_xyz = self.xyzrange2sigmoidxyz(decode_bboxes3d[:, :3])
+        decode_ass_xyz = torch.cat([decode_ass_xyz[:, :1],decode_ass_xyz[:, 1:2]-decode_ass_xyz[:, 1:2],decode_ass_xyz[:, 2:3]],dim=-1)
+        decode_ass_dim = decode_bboxes3d[:, 3:6]/decode_bboxes3d[:, 3:6]/60# / 30  # / decode_bboxes3d[:, 3:6]
         decode_ass_roty = decode_bboxes3d[:, 6:] - decode_bboxes3d[:, 6:]
         decode_bboxes3d_ass = torch.cat([decode_ass_xyz, decode_ass_dim, decode_ass_roty], dim=-1)
 
-        gt_bboxes_3d_target_xyz = self.sigmoidxyz2xyzrange(gt_bboxes_3d_ass_xyz)#gt_bboxes_3d[:, :3]
+        gt_bboxes_3d_target_xyz = gt_bboxes_3d[:, :3]
         gt_bboxes_3d_target_dim = gt_bboxes_3d[:, 3:6]
         gt_bboxes_3d_target_roty = gt_bboxes_3d[:, 6:]
         gt_bboxes_3d_target = torch.cat([gt_bboxes_3d_target_xyz, gt_bboxes_3d_target_dim, gt_bboxes_3d_target_roty],
                                         dim=-1)
         dnassign_result = self.dnassigner.assign(decode_bboxes3d_ass, cls_out, gt_bboxes_3d_ass,
-                                                 gt_labels_3d, img_meta, )
+                                             gt_labels_3d, img_meta, )
         dnsampling_result = self.sampler.sample(dnassign_result, reg_out, gt_bboxes_3d)
         dnsingle_img_pos_inds = dnsampling_result.pos_inds
 
         single_img_labels_dntarget = gt_bboxes_3d.new_full((self.num_query,), self.num_classes, dtype=torch.long)
         single_img_labels_dntarget[dnsingle_img_pos_inds] = gt_labels_3d[dnsampling_result.pos_assigned_gt_inds]
 
-        single_img_bboxes3d_dntarget = torch.cat([reg_out[:, :6], torch.atan2(reg_out[:, 6:7], reg_out[:, 7:8])],
-                                                 dim=-1)
-        single_img_bboxes3d_dntarget[dnsingle_img_pos_inds] = gt_bboxes_3d_target[
-            dnsampling_result.pos_assigned_gt_inds]
+        single_img_bboxes3d_dntarget = torch.cat([reg_out[:,:6],torch.atan2(reg_out[:,6:7],reg_out[:,7:8])],dim=-1)
+        single_img_bboxes3d_dntarget[dnsingle_img_pos_inds] = gt_bboxes_3d_target[dnsampling_result.pos_assigned_gt_inds]
         if dnassign_result.max_overlaps is not None:
-            single_img_bboxes3d_dnweight = dnassign_result.max_overlaps.clamp(0., 1.)
+            single_img_bboxes3d_dnweight = dnassign_result.max_overlaps.clamp(1e-3,1.)
         else:
             single_img_bboxes3d_dnweight = torch.zeros(reg_out.size(0), dtype=torch.float32, device=reg_out.device)
+
+
 
         assign_result = self.assigner.assign(decode_bboxes3d_ass, cls_out, gt_bboxes_3d_ass,
                                              gt_labels_3d, img_meta, )
@@ -427,11 +411,11 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         single_img_bboxes3d_target = gt_bboxes_3d_target[sampling_result.pos_assigned_gt_inds]
         single_img_bboxes3d_target = single_img_bboxes3d_target.to(device)
 
-        # hungarian prior
+        #hungarian prior
         single_img_labels_dntarget[single_img_pos_inds] = gt_labels_3d[sampling_result.pos_assigned_gt_inds]
         single_img_bboxes3d_dntarget[single_img_pos_inds] = gt_bboxes_3d_target[sampling_result.pos_assigned_gt_inds]
-        return single_img_labels_target, single_img_bboxes3d_target, single_img_pos_inds, \
-               single_img_labels_dntarget, single_img_bboxes3d_dntarget, dnsingle_img_pos_inds, single_img_bboxes3d_dnweight
+        return single_img_labels_target, single_img_bboxes3d_target, single_img_pos_inds,\
+               single_img_labels_dntarget,single_img_bboxes3d_dntarget, dnsingle_img_pos_inds,single_img_bboxes3d_dnweight
 
     @torch.no_grad()
     def get_dntargets_single_img(self, cls_out, reg_out, decode_bboxes3d, gt_bboxes_3d, gt_labels_3d, img_meta):
@@ -440,17 +424,14 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         if isinstance(gt_bboxes_3d, CameraInstance3DBoxes):  # target bbox3d with gravity center and alpha
             gt_bboxes_3d = gt_bboxes_3d.tensor.to(device)
         gt_bboxes_3d_ass_xyz = self.xyzrange2sigmoidxyz(gt_bboxes_3d[:, :3])
-        gt_bboxes_3d_ass_xyz = torch.cat(
-            [gt_bboxes_3d_ass_xyz[:, :1], gt_bboxes_3d_ass_xyz[:, 1:2] - gt_bboxes_3d_ass_xyz[:, 1:2],
-             gt_bboxes_3d_ass_xyz[:, 2:3]], dim=-1)
-        gt_bboxes_3d_ass_dim = gt_bboxes_3d[:, 3:6] / gt_bboxes_3d[:, 3:6] / 60
+        gt_bboxes_3d_ass_xyz = torch.cat([gt_bboxes_3d_ass_xyz[:, :1],gt_bboxes_3d_ass_xyz[:, 1:2]-gt_bboxes_3d_ass_xyz[:, 1:2],gt_bboxes_3d_ass_xyz[:, 2:3]],dim=-1)
+        gt_bboxes_3d_ass_dim = gt_bboxes_3d[:, 3:6]/gt_bboxes_3d[:, 3:6]/60
         gt_bboxes_3d_ass_roty = gt_bboxes_3d[:, 6:] - gt_bboxes_3d[:, 6:]
         gt_bboxes_3d_ass = torch.cat([gt_bboxes_3d_ass_xyz, gt_bboxes_3d_ass_dim, gt_bboxes_3d_ass_roty], dim=-1)
 
         decode_ass_xyz = self.xyzrange2sigmoidxyz(decode_bboxes3d[:, :3])
-        decode_ass_xyz = torch.cat(
-            [decode_ass_xyz[:, :1], decode_ass_xyz[:, 1:2] - decode_ass_xyz[:, 1:2], decode_ass_xyz[:, 2:3]], dim=-1)
-        decode_ass_dim = decode_bboxes3d[:, 3:6] / decode_bboxes3d[:, 3:6] / 60  # / 30  # / decode_bboxes3d[:, 3:6]
+        decode_ass_xyz = torch.cat([decode_ass_xyz[:, :1],decode_ass_xyz[:, 1:2]-decode_ass_xyz[:, 1:2],decode_ass_xyz[:, 2:3]],dim=-1)
+        decode_ass_dim = decode_bboxes3d[:, 3:6]/decode_bboxes3d[:, 3:6]/60# / 30  # / decode_bboxes3d[:, 3:6]
         decode_ass_roty = decode_bboxes3d[:, 6:] - decode_bboxes3d[:, 6:]
         decode_bboxes3d_ass = torch.cat([decode_ass_xyz, decode_ass_dim, decode_ass_roty], dim=-1)
 
@@ -461,7 +442,7 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
                                         dim=-1)
 
         assign_result = self.dnassigner.assign(decode_bboxes3d_ass, cls_out, gt_bboxes_3d_ass,
-                                               gt_labels_3d, img_meta, )
+                                             gt_labels_3d, img_meta, )
         sampling_result = self.sampler.sample(assign_result, reg_out, gt_bboxes_3d)
         single_img_pos_inds = sampling_result.pos_inds
         # print('single_img_pos_inds', single_img_pos_inds)
@@ -470,11 +451,10 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         single_img_labels_target[single_img_pos_inds] = gt_labels_3d[sampling_result.pos_assigned_gt_inds]
 
         # bbox targets
-        single_img_bboxes3d_dntarget = torch.cat([reg_out[:, :6], torch.atan2(reg_out[:, 6:7], reg_out[:, 7:8])],
-                                                 dim=-1)
+        single_img_bboxes3d_dntarget = torch.cat([reg_out[:,:6],torch.atan2(reg_out[:,6:7],reg_out[:,7:8])],dim=-1)
         single_img_bboxes3d_dntarget[single_img_pos_inds] = gt_bboxes_3d_target[sampling_result.pos_assigned_gt_inds]
 
-        return single_img_labels_target, single_img_bboxes3d_dntarget, single_img_pos_inds
+        return single_img_labels_target,single_img_bboxes3d_dntarget,single_img_pos_inds
 
     # @torch.no_grad()
     # def get_dntargets_single_img(self, cls_out, reg_out, decode_bboxes3d, gt_bboxes_3d, gt_labels_3d, img_meta):
@@ -517,12 +497,12 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
     #             0, 2, 1)[0]
     #
     #     return single_img_labels_dntarget, single_img_bboxes3d_dntarget,
-    @force_fp32(apply_to=('cls_out', 'reg_out'))
+
     def loss(self, cls_out, reg_out,
              gt_bboxes_3d,
              gt_labels_3d,
              img_metas, gt_bboxes_ignore=None):
-        # cam2imgs = torch.stack([img_meta['cam2img'] for img_meta in img_metas], dim=0).to(cls_out.device)
+        cam2imgs = torch.stack([img_meta['cam2img'] for img_meta in img_metas], dim=0).to(cls_out.device)
         # reg_xyz_out = (reg_out[..., 0:3] + 1) * 0.5 * (self.xyzrange[:, 1] - self.xyzrange[:, 0])[
         #     None, None] + self.xyzrange[:, 0][None, None]
         decode_bboxes3d = torch.cat(
@@ -551,7 +531,7 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         """
         h, w = bev_size
         x_range = torch.arange(w, dtype=dtype, device=device) / w
-        y = torch.ones((h, w, 1), dtype=dtype, device=device) * 0.67
+        y = torch.ones((h, w, 1), dtype=dtype, device=device)
         z_range = torch.arange(h, dtype=dtype, device=device) / h
         z, x = torch.meshgrid(z_range, x_range)
         # x = x * ux_div_fdx * z_range[:, None]
@@ -564,7 +544,7 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         return proiors.unsqueeze(0).repeat(batch_size, 1, 1, 1)
 
     def get_loss_from_target(self, cls_out, reg_out, batch_target):
-        batch_labels_targets, batch_bboxes3d_targets, batch_pos_inds, batch_labels_dntargets, batch_bboxes3d_dntargets, batch_pos_dninds, dnweight = batch_target
+        batch_labels_targets, batch_bboxes3d_targets, batch_pos_inds, batch_labels_dntargets, batch_bboxes3d_dntargets,batch_pos_dninds,dnweight = batch_target
         batch_pos_binds = torch.cat(
             [pos_inds + self.num_query * batch_id for batch_id, pos_inds in enumerate(batch_pos_inds)])
         batch_pos_dnbinds = torch.cat(
@@ -577,7 +557,7 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         batch_bboxes3d_targets = torch.cat(batch_bboxes3d_targets, dim=0)
         batch_labels_dntargets = torch.cat(batch_labels_dntargets, dim=0)
         batch_bboxes3d_dntargets = torch.cat(batch_bboxes3d_dntargets, dim=0)
-        dnweight = torch.cat(dnweight, dim=0)
+        dnweight  = torch.cat(dnweight, dim=0)
 
         batch_labels_weight = torch.ones_like(batch_labels_targets) * self.bg_cls_weight
         batch_labels_weight[batch_pos_binds] = 1.0
@@ -604,30 +584,18 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
             # reg_xyz_target = (batch_bboxes3d_targets[:, :3] - self.xyzrange[:, 0][None]) / (
             #         self.xyzrange[:, 1] - self.xyzrange[:, 0]) * 2 - 1
             # batch_bboxes3d_targets = torch.cat([reg_xyz_target, batch_bboxes3d_targets[:, 3:]], dim=-1)
-            # print(batch_pos_binds)
+            print(batch_pos_binds)
             # print(cls_out[:,:3])
-            print(F.softmax(cls_out[batch_pos_binds][:3],
+            print(F.softmax(cls_out[batch_pos_binds][0],
                             dim=-1).detach().cpu().numpy().tolist(),
-                  labels_pos[:3])
+                  num_batch_pos)
             print(decode_bboxes3d[0].detach().cpu().numpy().tolist())
             print(batch_bboxes3d_targets[0].detach().cpu().numpy().tolist())
-            # print(self.bev_query[0, 4])
             loss_xyz = self.loss_iou3d(
                 decode_bboxes3d_xyz,
                 bboxes3d_pos,
                 avg_factor=max(num_batch_pos, 1)
             )
-            # loss_xy = self.loss_reg(
-            #     decode_bboxes3d_xyz[:, :2]/bboxes3d_pos[:,2:3],
-            #     bboxes3d_pos[:, :2]/bboxes3d_pos[:,2:3],
-            #     avg_factor=max(num_batch_pos, 1)
-            # )
-            # loss_z =self.loss_reg(
-            #     decode_bboxes3d_xyz[:,2:3],
-            #     bboxes3d_pos[:,2:3],
-            #     avg_factor=max(num_batch_pos, 1)
-            # )
-
             loss_dim = self.loss_iou3d(
                 decode_bboxes3d_dim,
                 bboxes3d_pos,
@@ -645,13 +613,10 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
             )
             mae_xyz = (decode_bboxes3d[:, :3] - batch_bboxes3d_targets[:, :3]).abs().mean()
             mae_dim = (decode_bboxes3d[:, 3:6] - batch_bboxes3d_targets[:, 3:6]).abs().mean()
-            mae_roty = loss_roty * 10 / torch.pi * 180
+            mae_roty = loss_roty*10 / torch.pi * 180
 
         else:
             loss_xyz = reg_out.sum() * 0
-            # loss_xy = loss_xyz
-            # loss_z = loss_xyz
-
             loss_dim = loss_xyz
             loss_roty = loss_xyz
             loss_reg_xyzdim = loss_xyz
@@ -660,7 +625,7 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
             mae_roty = loss_xyz
 
         reg_dnout = reg_out
-        dn_reg_weight = dnweight #* (1 - F.softmax(cls_out, dim=-1).max(-1)[0])
+        dn_reg_weight = dnweight
         if num_batch_dnpos > 0:
             dn_reg_weight = dn_reg_weight[batch_pos_dnbinds]
             bboxes3d_dnpos = batch_bboxes3d_dntargets[batch_pos_dnbinds]
@@ -670,9 +635,8 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
             reg_dim_dnpos = (reg_dnpos[:, 3:6]) * self.canon_box_sizes[labels_dnpos]
             decode_bboxes3d_dnxyz = torch.cat([reg_xyz_dnpos, bboxes3d_dnpos[..., 3:]], dim=-1)
             decode_bboxes3d_dndim = torch.cat([bboxes3d_dnpos[:, :3], reg_dim_dnpos, bboxes3d_dnpos[:, 6:]], dim=-1)
-            # decode_bboxes3d = torch.cat(
-            #     [reg_xyz_dnpos, reg_dim_dnpos, torch.atan2(reg_dnpos[..., 6:7], reg_dnpos[..., 7:8])],
-            #     dim=-1)
+            decode_bboxes3d = torch.cat([reg_xyz_dnpos, reg_dim_dnpos, torch.atan2(reg_dnpos[..., 6:7], reg_dnpos[..., 7:8])],
+                                        dim=-1)
 
             loss_dnxyz = self.loss_iou3d(
                 decode_bboxes3d_dnxyz,
@@ -701,9 +665,6 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         return dict(
             loss_cls=loss_cls,
             loss_xyz=loss_xyz,
-            # loss_xy=loss_xy,
-            # loss_z=loss_z,
-
             loss_dim=loss_dim,
             loss_roty=loss_roty,
             loss_xyzdn=loss_dnxyz,
