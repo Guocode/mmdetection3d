@@ -149,9 +149,9 @@ class DilatedNeck(BaseModule):
         self.latter4 = Conv(c4, p4, k=1, act=None)
         self.smooth4 = Conv(p4, p4, k=3, p=1, act=act)
 
-        self.deconv3 = ResizeConv(c1=p4, c2=p3, act=act, scale_factor=2)  # 16 -> 8
-        self.latter3 = Conv(c3, p3, k=1, act=None)
-        self.smooth3 = Conv(p3, p3, k=3, p=1, act=act)
+        # self.deconv3 = ResizeConv(c1=p4, c2=p3, act=act, scale_factor=2)  # 16 -> 8
+        # self.latter3 = Conv(c3, p3, k=1, act=None)
+        # self.smooth3 = Conv(p3, p3, k=3, p=1, act=act)
 
         # self.deconv2 = ResizeConv(c1=p3, c2=p2, act=act, scale_factor=2)  # 8 -> 4
         # self.latter2 = Conv(c2, p2, k=1, act=None)
@@ -162,10 +162,10 @@ class DilatedNeck(BaseModule):
         c2,c3,c4,c5 = x
         p5 = self.neck(c5)
         p4 = self.smooth4(self.latter4(c4) + self.deconv4(p5))
-        p3 = self.smooth3(self.latter3(c3) + self.deconv3(p4))
+        # p3 = self.smooth3(self.latter3(c3) + self.deconv3(p4))
         # p2 = self.smooth2(self.latter2(c2) + self.deconv2(p3))
 
-        return (p3,p4,p5)
+        return (p4,p5)
     def _get_deconv_cfg(self, deconv_kernel, index):
         if deconv_kernel == 4:
             padding = 1

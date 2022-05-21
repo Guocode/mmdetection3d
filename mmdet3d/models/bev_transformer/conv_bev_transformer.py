@@ -45,10 +45,13 @@ class CoordConv(nn.Module):
 class HSEBlock(nn.Module):
     def __init__(self, inchn,outchn,pool_func=F.adaptive_max_pool2d, init_cfg=None):
         super(HSEBlock, self).__init__()
-        self.pool_func = pool_func
+        self.hpool_func = pool_func
+        self.vpool_func = pool_func
         self.inchn = inchn
         self.outchn = outchn
         self.conv_h= ConvModule(outchn, outchn, (9, 1), (1, 1), (4, 0), groups=outchn,
+                           norm_cfg=dict(type='BN'))
+        self.conv_v= ConvModule(outchn, outchn, (1, 9), (1, 1), (0, 4), groups=outchn,
                            norm_cfg=dict(type='BN'))
         self.conv_n= ConvModule(outchn, outchn, (3, 3), (1, 1), (1, 1), groups=outchn,
                            norm_cfg=dict(type='BN'))
@@ -56,19 +59,21 @@ class HSEBlock(nn.Module):
             self.res_conv = ConvModule(inchn, outchn, (1, 1), (1, 1), (0, 0), groups=1,
                            norm_cfg=dict(type='BN'))
     def forward(self, x):
-        px = self.pool_func(x, (1, x.size(3)))
-        if self.inchn!=self.outchn:
-            x = self.res_conv(x + px)
-        else:
-            x = x+px
+        hpx = self.hpool_func(x, (1, x.size(3)))
+        vpx = self.vpool_func(x, (x.size(2), 1))
 
-        cx = self.conv_n(self.conv_h(x))
-        return cx+x
         if self.inchn!=self.outchn:
-            x = self.res_conv(x + px) + cx
+            x = self.res_conv(x * torch.sigmoid(hpx+vpx))
         else:
-            x = x + px + cx
-        return x
+            x = x*torch.sigmoid(hpx+vpx)
+
+        cx = self.conv_n(self.conv_v(self.conv_h(x)))
+        return cx+x
+        # if self.inchn!=self.outchn:
+        #     x = self.res_conv(x + px) + cx
+        # else:
+        #     x = x + px + cx
+        # return x
 
 
 class ConvBEVTransformer(nn.Module):
@@ -91,9 +96,9 @@ class ConvBEVTransformer(nn.Module):
         self._init_layers()
 
     def forward(self, x):
-        x = self.coordconv(x)
         bev_feats = self.bev_convs(x)
         # bev_feats = self.bev_convs_l(bev_feats)
+        bev_feats = self.coordconv(bev_feats)
         return bev_feats
 
     def init_weights(self):

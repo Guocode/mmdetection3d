@@ -15,45 +15,7 @@ from ..bev_transformer.conv_bev_transformer import ConvBEVTransformer
 from mmdet.models.builder import HEADS, build_loss
 from mmdet3d.models.dense_heads.base_mono3d_dense_head import BaseMono3DDenseHead
 
-class AddCoords(nn.Module):
-    def __init__(self, with_r=False):
-        super().__init__()
-        self.with_r = with_r
-    def forward(self, input_tensor):
-        """
-        Args:
-            input_tensor: shape(batch, channel, x_dim, y_dim)
-        """
-        batch_size, _, x_dim, y_dim = input_tensor.size()
-        xx_channel = torch.arange(x_dim).repeat(1, y_dim, 1)
-        yy_channel = torch.arange(y_dim).repeat(1, x_dim, 1).transpose(1, 2)
-        xx_channel = xx_channel.float() / (x_dim - 1)
-        yy_channel = yy_channel.float() / (y_dim - 1)
-        xx_channel = xx_channel * 2 - 1
-        yy_channel = yy_channel * 2 - 1
-        xx_channel = xx_channel.repeat(batch_size, 1, 1, 1).transpose(2, 3)
-        yy_channel = yy_channel.repeat(batch_size, 1, 1, 1).transpose(2, 3)
-        ret = torch.cat([
-            input_tensor,
-            xx_channel.type_as(input_tensor),
-            yy_channel.type_as(input_tensor)], dim=1)
-        if self.with_r:
-            rr = torch.sqrt(torch.pow(xx_channel.type_as(input_tensor) - 0.5, 2) + torch.pow(yy_channel.type_as(input_tensor) - 0.5, 2))
-            ret = torch.cat([ret, rr], dim=1)
-        return ret
 
-class CoordConv(nn.Module):
-    def __init__(self, in_channels, out_channels, with_r=False, **kwargs):
-        super().__init__()
-        self.addcoords = AddCoords(with_r=with_r)
-        in_size = in_channels+2
-        if with_r:
-            in_size += 1
-        self.conv = nn.Conv2d(in_size, out_channels, **kwargs)
-    def forward(self, x):
-        ret = self.addcoords(x)
-        ret = self.conv(ret)
-        return ret
 class ResConvModule(nn.Module):
     def __init__(self, *args, **kwargs):
         super(ResConvModule, self).__init__()
@@ -159,11 +121,10 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
                  in_channels,
                  feat_channels=128,
                  stacked_convs=4,
-                 loss_cls=dict(type='CrossEntropyLoss', loss_weight=5.0),
-                 # loss_cls=dict(type='FocalLoss', loss_weight=10.0),
+                 # loss_cls=dict(type='CrossEntropyLoss', loss_weight=1.0),
+                 loss_cls=dict(type='FocalLoss', loss_weight=1.0),
                  loss_dir=dict(type='DirCosineLoss', loss_weight=0.1),
-                 # loss_reg=dict(type='L1Loss'),
-                 loss_reg=dict(type='SmoothL1Loss',beta=0.005),
+                 loss_reg=dict(type='L1Loss'),
                  loss_iou3d=dict(type='DIOU3DLoss'),
                  bg_cls_weight=0.1,
                  conv_bias='auto',
@@ -203,8 +164,8 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         self.register_buffer('xyzrange',
                              torch.asarray([xrange, yrange, zrange, self.xrange_min], dtype=torch.float32))  # (3,2)
         self.bev_prior_size = bev_prior_size
-        # self.num_query_sqrt = num_query_sqrt
-        # self.num_query = num_query_sqrt ** 2
+        self.num_query_sqrt = num_query_sqrt
+        self.num_query = num_query_sqrt ** 2
         self.bev_transformer_chn = feat_channels if bev_transformer_chn is None else bev_transformer_chn
         self.bev_transformer_convs_num = bev_transformer_convs_num
         self.bev_transformer_kernel_s = bev_transformer_kernel_s
@@ -219,9 +180,6 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         self.test_cfg = test_cfg
         self.dn_train = dn_train
         self.dense_assign = False
-        self.in_h = 2
-        self.in_w = 2
-        self.xyz_prior = nn.Parameter(torch.normal(0,0.1,(1,12*40,3)),requires_grad=True)
         if self.train_cfg:
             self.assigner = build_assigner(self.train_cfg.assigner)
             if self.dense_assign:
@@ -240,79 +198,76 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         #                                           kernel_s=self.bev_transformer_kernel_s,
         #                                           )
         self._init_clsreg_convs()
-        self.coordconv = CoordConv(self.in_channels,self.feat_channels,kernel_size=(3,3),padding=(1,1))
+        positional_xyz_encoded = torch.stack(
+            [*torch.meshgrid(torch.arange(0, self.num_query_sqrt) / self.num_query_sqrt * 2 - 1,
+                             torch.arange(0, self.num_query_sqrt) / self.num_query_sqrt * 2 - 1),  # TODO 非均匀query生成
+             torch.normal(0, 0.01, (self.num_query_sqrt, self.num_query_sqrt))])
+        # positional_xyz_encoded = torch.normal(0, 0.01, (3,self.num_query_sqrt, self.num_query_sqrt))
+        self.positional_query = nn.Parameter(positional_xyz_encoded[None, ...],
+                                             requires_grad=True)  # (0,1) related with xyz
+        self.positional_query_embedding = nn.Sequential(
+            ConvModule(3, self.feat_channels, 1,norm_cfg=self.norm_cfg,act_cfg=dict(type='Tanh')),
+            # nn.Tanh(),
+            # ResConvModule(self.feat_channels, self.feat_channels, 1,norm_cfg=self.norm_cfg,act_cfg=dict(type='Tanh')),
+            # nn.LayerNorm([self.feat_channels, self.num_query_sqrt, self.num_query_sqrt])
+            # nn.Sigmoid()
+        )
+        self.dn_positional_query_embedding = nn.Sequential(
+            nn.Conv2d(3, self.feat_channels, 1),
+            nn.Tanh(),
+            nn.Conv2d(self.feat_channels, self.feat_channels, 1),
+            # nn.LayerNorm([self.feat_channels, self.num_query_sqrt, self.num_query_sqrt])
+            # nn.Sigmoid()
+        )
 
-        # positional_xyz_encoded = torch.stack(
-        #     [*torch.meshgrid(torch.arange(0, self.in_h) / self.in_h * 2 - 1,
-        #                      torch.arange(0, self.in_w) / self.in_w * 2 - 1),  # TODO 非均匀query生成
-        #      torch.normal(0, 0.01, (self.in_h, self.in_w))])
-        # # positional_xyz_encoded = torch.normal(0, 0.01, (3,self.num_query_sqrt, self.num_query_sqrt))
-        # self.positional_query = nn.Parameter(positional_xyz_encoded[None, ...],
-        #                                      requires_grad=True)  # (0,1) related with xyz
-        # self.positional_query_embedding = nn.Sequential(
-        #     ConvModule(3, self.feat_channels, 1,norm_cfg=self.norm_cfg,act_cfg=dict(type='Tanh')),
-        #     # nn.Tanh(),
-        #     # ResConvModule(self.feat_channels, self.feat_channels, 1,norm_cfg=self.norm_cfg,act_cfg=dict(type='Tanh')),
-        #     # nn.LayerNorm([self.feat_channels, self.num_query_sqrt, self.num_query_sqrt])
-        #     # nn.Sigmoid()
-        # )
-        #
-        # self.dn_positional_query_embedding = nn.Sequential(
-        #     nn.Conv2d(3, self.feat_channels, 1),
-        #     nn.Tanh(),
-        #     nn.Conv2d(self.feat_channels, self.feat_channels, 1),
-        #     # nn.LayerNorm([self.feat_channels, self.num_query_sqrt, self.num_query_sqrt])
-        #     # nn.Sigmoid()
-        # )
-        #
-        # self.content_query = nn.Parameter(
-        #     torch.normal(0, 0.01, (1, self.cls_out_channels + 3 + 2, self.in_h, self.in_w)),
-        #     requires_grad=True)  # related with cls+dxdydz+roty(sincos)
-        # self.content_query_embedding = nn.Sequential(
-        #     ConvModule(self.cls_out_channels + 3 + 2, self.feat_channels, 1,norm_cfg=self.norm_cfg,act_cfg=dict(type='Tanh')),
-        #     # nn.ReLU(),
-        #     # ResConvModule(self.feat_channels, self.feat_channels, 1,norm_cfg=self.norm_cfg,act_cfg=dict(type='Tanh')),
-        #     # nn.LayerNorm([self.feat_channels, self.num_query_sqrt, self.num_query_sqrt])
-        #     # nn.Sigmoid()
-        # )
-        # self.dn_content_query_embedding = nn.Sequential(
-        #     nn.Conv2d(self.cls_out_channels + 3 + 2, self.feat_channels, 1),
-        #     # nn.ReLU(),
-        #     nn.Conv2d(self.feat_channels, self.feat_channels, 1),
-        #     # nn.LayerNorm([self.feat_channels, self.num_query_sqrt, self.num_query_sqrt])
-        #     # nn.Sigmoid()
-        # )
-        # self.bev_enc = nn.Sequential(
-        #     # nn.Dropout(p=0.1),
-        #     ConvModule(
-        #         self.feat_channels,
-        #         self.feat_channels,
-        #         3,
-        #         padding=1,
-        #         norm_cfg=self.norm_cfg
-        #     ),
-        # )
-        # self.cont2posi = nn.Sequential(
-        #     # nn.Conv2d(self.feat_channels, self.feat_channels, 1,bias=False)
-        #     ConvModule(self.feat_channels, self.feat_channels,1,norm_cfg=self.norm_cfg,act_cfg=dict(type='Tanh'))
-        # )
+        self.content_query = nn.Parameter(
+            torch.normal(0, 0.01, (1, self.cls_out_channels + 3 + 2, self.num_query_sqrt, self.num_query_sqrt)),
+            requires_grad=True)  # related with cls+dxdydz+roty(sincos)
+        self.content_query_embedding = nn.Sequential(
+            ConvModule(self.cls_out_channels + 3 + 2, self.feat_channels, 1,norm_cfg=self.norm_cfg,act_cfg=dict(type='Tanh')),
+            # nn.ReLU(),
+            # ResConvModule(self.feat_channels, self.feat_channels, 1,norm_cfg=self.norm_cfg,act_cfg=dict(type='Tanh')),
+            # nn.LayerNorm([self.feat_channels, self.num_query_sqrt, self.num_query_sqrt])
+            # nn.Sigmoid()
+        )
+        self.dn_content_query_embedding = nn.Sequential(
+            nn.Conv2d(self.cls_out_channels + 3 + 2, self.feat_channels, 1),
+            # nn.ReLU(),
+            nn.Conv2d(self.feat_channels, self.feat_channels, 1),
+            # nn.LayerNorm([self.feat_channels, self.num_query_sqrt, self.num_query_sqrt])
+            # nn.Sigmoid()
+        )
+        self.bev_enc = nn.Sequential(
+            nn.Dropout(p=0.1),
+            ConvModule(
+                self.feat_channels,
+                self.feat_channels,
+                3,
+                padding=1,
+                norm_cfg=self.norm_cfg
+            ),
+        )
+        self.cont2posi = nn.Sequential(
+            # nn.Conv2d(self.feat_channels, self.feat_channels, 1,bias=False)
+            ConvModule(self.feat_channels, self.feat_channels,1,norm_cfg=self.norm_cfg,act_cfg=dict(type='Tanh'))
+        )
         self.ffn = nn.Sequential(
             nn.Dropout(0.1),
             nn.Conv2d(self.feat_channels, self.cls_out_channels + self.reg_out_channels, 1),
         )
 
-        # self.ffn_cont_cls = nn.Sequential(
-        #     nn.Dropout(0.1),
-        #     nn.Conv2d(self.feat_channels, self.cls_out_channels, 1),
-        # )
-        # self.ffn_cont_oth = nn.Sequential(
-        #     nn.Dropout(0.1),
-        #     nn.Conv2d(self.feat_channels, 3 + 2, 1),
-        # )
-        # self.ffn_posi = nn.Sequential(
-        #     nn.Dropout(0.1),
-        #     nn.Conv2d(self.feat_channels, 3, 1),
-        # )
+        self.ffn_cont_cls = nn.Sequential(
+            # nn.Dropout(0.1),
+            nn.Conv2d(self.feat_channels, self.cls_out_channels, 1),
+        )
+        self.ffn_cont_oth = nn.Sequential(
+            nn.Dropout(0.1),
+            nn.Conv2d(self.feat_channels, 3 + 2, 1,bias=False),
+        )
+        self.ffn_posi = nn.Sequential(
+            nn.Dropout(0.1),
+            nn.Conv2d(self.feat_channels, 3, 1,bias=False),
+        )
         self.init_weights()
 
     def _init_clsreg_convs(self):
@@ -334,23 +289,11 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
                     norm_cfg=self.norm_cfg,
                     bias=self.conv_bias),
             )
-            clsreg_convs.append(
-                ResConvModule(
-                    chout,
-                    chout,
-                    3,
-                    stride=1,
-                    padding=1,
-                    groups=chout,
-                    conv_cfg=conv_cfg,
-                    norm_cfg=self.norm_cfg,
-                    bias=self.conv_bias),
-            )
             # clsreg_convs.append(
             #     CBAMBlock("FC", 3, channels=chout, ratio=chout // 4)
             # )
             clsreg_convs.append(
-                NonLocal2d(chout,reduction=4,sub_sample=True)
+                NonLocal2d(chout)
             )
         self.clsreg_convs = nn.Sequential(*clsreg_convs)
 
@@ -361,26 +304,26 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         default init of DCN triggered by the init_cfg will init
         conv_offset.weight, which mistakenly affects the training stability.
         """
-        # for bev_enc in self.bev_enc:
-        #     normal_init(bev_enc, std=0.01, bias=0.0)
+        for bev_enc in self.bev_enc:
+            normal_init(bev_enc, std=0.01, bias=0.0)
         for conv_cls in self.clsreg_convs:
             normal_init(conv_cls, std=0.01)
-        # normal_init(self.ffn_posi, std=0.01, bias=0.)
-        # normal_init(self.ffn_cont_cls, std=1.)
-        # normal_init(self.ffn_cont_oth, std=0.01, bias=0.)
-        # for m in self.content_query_embedding:
-        #     if isinstance(m, nn.Conv2d):
-        #         normal_init(m, std=0.01, bias=0.0)
-        # for m in self.dn_content_query_embedding:
-        #     if isinstance(m, nn.Conv2d):
-        #         normal_init(m, std=0.01, bias=0.0)
-        # for m in self.positional_query_embedding:
-        #     if isinstance(m, nn.Conv2d):
-        #         normal_init(m, std=0.01, bias=0.0)
-        # for m in self.dn_positional_query_embedding:
-        #     if isinstance(m, nn.Conv2d):
-        #         normal_init(m, std=0.01, bias=0.0)
-        # normal_init(self.cont2posi, std=0.01)
+        normal_init(self.ffn_posi, std=0.01, bias=0.)
+        normal_init(self.ffn_cont_cls, std=1.)
+        normal_init(self.ffn_cont_oth, std=0.01, bias=0.)
+        for m in self.content_query_embedding:
+            if isinstance(m, nn.Conv2d):
+                normal_init(m, std=0.01, bias=0.0)
+        for m in self.dn_content_query_embedding:
+            if isinstance(m, nn.Conv2d):
+                normal_init(m, std=0.01, bias=0.0)
+        for m in self.positional_query_embedding:
+            if isinstance(m, nn.Conv2d):
+                normal_init(m, std=0.01, bias=0.0)
+        for m in self.dn_positional_query_embedding:
+            if isinstance(m, nn.Conv2d):
+                normal_init(m, std=0.01, bias=0.0)
+        normal_init(self.cont2posi, std=0.01)
 
 
         # for conv_reg in self.reg_convs:
@@ -473,43 +416,42 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
 
     def forward(self, feats, content_query=None, positional_query=None):
         feats_singlelvl = feats[0]  #
-        bev_query = self.coordconv(feats_singlelvl)
-
-        # bev_query = self.bev_transformer(feats_singlelvl)
+        bev_feats = feats_singlelvl  # self.bev_transformer(feats_singlelvl)
         # bev_feats = F.adaptive_avg_pool2d(bev_feats, (self.num_query_sqrt, self.num_query_sqrt))
-        b, c, h, w = bev_query.shape
-        # if content_query is None:
-        #     content_query = self.content_query
-        #     bev_query = bev_feats + self.content_query_embedding(content_query)
-        # else:
-        #     bev_query = bev_feats + self.content_query_embedding(content_query)
+        b, c, h, w = bev_feats.shape
+        bev_feats = bev_feats.reshape(b,c,h*w)
+        if content_query is None:
+            content_query = self.content_query
+            bev_query = bev_feats + self.content_query_embedding(content_query)
+        else:
+            bev_query = bev_feats + self.content_query_embedding(content_query)
 
-        # if positional_query is None:
-        #     positional_query = self.positional_query
-        #     postional_query_embed = self.positional_query_embedding(positional_query)
-        # else:
-        #     postional_query_embed = self.positional_query_embedding(positional_query)
-        # posi_query = postional_query_embed
+        if positional_query is None:
+            positional_query = self.positional_query
+            postional_query_embed = self.positional_query_embedding(positional_query)
+        else:
+            postional_query_embed = self.positional_query_embedding(positional_query)
+
+
+        posi_query = postional_query_embed
         # bev_query = torch.sigmoid(bev_feats)
         for clsreg_conv in self.clsreg_convs:
-            bev_query = clsreg_conv(bev_query)
-            # posi_query = posi_query + self.cont2posi(bev_query)
-        # cls_query = self.ffn_cont_cls(bev_query)
-        # oth_query = self.ffn_cont_oth(bev_query)
-        # posi_query = self.ffn_posi(posi_query)
-        # bev_query = torch.cat(
-        #     [cls_query, posi_query, oth_query], dim=1)
-        bev_query = self.ffn(bev_query)
-        cls_reg_out = bev_query.view(b,-1 , h*w).permute(0, 2, 1)
+            bev_query = self.bev_enc(clsreg_conv(bev_query))
+            posi_query = posi_query + self.cont2posi(bev_query)
+        cls_query = self.ffn_cont_cls(bev_query)
+        oth_query = self.ffn_cont_oth(bev_query)
+        posi_query = self.ffn_posi(posi_query)
+        bev_query = torch.cat(
+            [cls_query, posi_query, oth_query], dim=1)
+        cls_reg_out = bev_query.view(b, -1, self.num_query).permute(0, 2, 1)
         cls_out, reg_out = cls_reg_out[..., :self.cls_out_channels], cls_reg_out[..., self.cls_out_channels:]
         b, nq, c = cls_out.shape
-        cls_out = cls_out.view(b, nq, self.num_classes + 1)
+        cls_out = cls_out.view(b, self.num_query, self.num_classes + 1)
         b, nq, c = reg_out.shape
-        reg_out = reg_out.view(b, nq, sum(self.group_reg_dims))
-        reg_xyz_out = reg_out[..., 0:3].clamp(-1.5, 1.5)+self.xyz_prior  # (-1,1)
+        reg_out = reg_out.view(b, self.num_query, sum(self.group_reg_dims))
+        reg_xyz_out = reg_out[..., 0:3].clamp(-1.5, 1.5)  # (-1,1)
         reg_dim_out = torch.tanh(reg_out[..., 3:6])  # .clamp(-1.,1.)  # (0,2)
         reg_roty_out = reg_out[..., 6:8]  # -1,1
-        #self.alpha2roty(reg_out[..., 6:8],self.normxyz2xyzrange(reg_xyz_out))
         regs_out = torch.cat([reg_xyz_out, reg_dim_out, reg_roty_out], dim=-1)
         return cls_out, regs_out
 
@@ -518,7 +460,7 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         result_list = []
         for img_id in range(len(img_metas)):
             scores, labels = cls_out[img_id].sigmoid().max(-1)
-            pos_idx = (scores > 0.35) * (labels < self.num_classes)
+            pos_idx = (scores > 0.7) * (labels < self.num_classes)
             scores = scores[pos_idx]
             labels = labels[pos_idx]
 
@@ -603,18 +545,7 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
 
         return gt_content_query, pseudo_positional_query, pseudo_content_query, gt_positional_query, \
                single_img_labels_dntarget, single_img_bboxes3d_dntarget, pos_inds
-    def alpha2roty(self,alpha,xyz):
-        '''
 
-        :param alpha: N*2
-        :param xyz: N*3
-        :return:
-        '''
-        sinroty = alpha[:,0:1]*xyz[:,2:3]/(torch.sqrt(xyz[:,0:1]**2+xyz[:,2:3]**2)+1e-8)+\
-                  alpha[:,1:2]*xyz[:,0:1]/(torch.sqrt(xyz[:,0:1]**2+xyz[:,2:3]**2)+1e-8)
-        cosroty = alpha[:,1:2]*xyz[:,2:3]/(torch.sqrt(xyz[:,0:1]**2+xyz[:,2:3]**2)+1e-8) -\
-                  alpha[:,0:1]*xyz[:,0:1]/(torch.sqrt(xyz[:,0:1]**2+xyz[:,2:3]**2)+1e-8)
-        return torch.cat([sinroty,cosroty],dim=-1)
     def get_targets(self, cls_out, reg_out, decode_bboxes3d, gt_bboxes_3d, gt_labels_3d, img_metas):
         batch_targets_res = multi_apply(
             self.get_targets_single_img,
@@ -639,10 +570,8 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
     def get_targets_single_img(self, cls_out, reg_out, decode_bboxes3d, gt_bboxes_3d, gt_labels_3d, img_meta):
         # assigner and sampler
         device = cls_out.device
-        num_query = cls_out.size(0)
         if isinstance(gt_bboxes_3d, CameraInstance3DBoxes):  # target bbox3d with gravity center and alpha
-            gt_bboxes_3d = torch.cat([gt_bboxes_3d.tensor[:,:6], gt_bboxes_3d.local_yaw[...,None]],dim=-1)
-            gt_bboxes_3d = gt_bboxes_3d.to(device)
+            gt_bboxes_3d = gt_bboxes_3d.tensor.to(device)
         gt_bboxes_3d_ass_xyz = self.xyzrange2normxyz(gt_bboxes_3d[:, :3])
         gt_bboxes_3d_ass_xyz = torch.cat(
             [gt_bboxes_3d_ass_xyz[:, :1], gt_bboxes_3d_ass_xyz[:, 1:2] - gt_bboxes_3d_ass_xyz[:, 1:2],
@@ -671,7 +600,7 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         gt_bboxes_3d_target = self.get_regtarget_from_gt(gt_bboxes_3d, gt_labels_3d)
 
         # label targets
-        single_img_labels_target = gt_bboxes_3d.new_full((num_query,), self.num_classes, dtype=torch.long)
+        single_img_labels_target = gt_bboxes_3d.new_full((self.num_query,), self.num_classes, dtype=torch.long)
         single_img_labels_target[single_img_pos_inds] = gt_labels_3d[sampling_result.pos_assigned_gt_inds]
 
         # bbox targets
@@ -684,7 +613,7 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
             dssampling_result = self.sampler.sample(dsassign_result, reg_out, gt_bboxes_3d)
             dssingle_img_pos_inds = dssampling_result.pos_inds
 
-            single_img_labels_dstarget = gt_bboxes_3d.new_full((num_query,), self.num_classes, dtype=torch.long)
+            single_img_labels_dstarget = gt_bboxes_3d.new_full((self.num_query,), self.num_classes, dtype=torch.long)
             single_img_labels_dstarget[dssingle_img_pos_inds] = gt_labels_3d[dssampling_result.pos_assigned_gt_inds]
 
             single_img_bboxes3d_dstarget = torch.cat([reg_out[:, :6], torch.atan2(reg_out[:, 6:7], reg_out[:, 7:8])],
@@ -692,11 +621,11 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
             single_img_bboxes3d_dstarget[dssingle_img_pos_inds] = gt_bboxes_3d_target[
                 dssampling_result.pos_assigned_gt_inds]
             if dsassign_result.max_overlaps is not None:
-                single_img_bboxes3d_dsweight = -dsassign_result.max_overlaps.clamp(0., 1.)
+                single_img_bboxes3d_dsweight = dsassign_result.max_overlaps.clamp(0., 1.)
             else:
                 single_img_bboxes3d_dsweight = torch.zeros(reg_out.size(0), dtype=torch.float32, device=reg_out.device)
             # hungarian prior to dense
-            single_img_bboxes3d_dsweight[single_img_pos_inds] = 0
+
             single_img_labels_dstarget[single_img_pos_inds] = gt_labels_3d[sampling_result.pos_assigned_gt_inds]
             single_img_bboxes3d_dstarget[single_img_pos_inds] = gt_bboxes_3d_target[
                 sampling_result.pos_assigned_gt_inds]
@@ -816,7 +745,7 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
     def get_loss_from_target(self, cls_out, reg_out, batch_target, prefix='', dn=False):
         batch_labels_targets, batch_bboxes3d_targets, batch_pos_inds, batch_labels_dntargets, batch_bboxes3d_dntargets, batch_pos_dninds, dnweight = batch_target
         batch_pos_binds = torch.cat(
-            [pos_inds + cls_out.size(1) * batch_id for batch_id, pos_inds in enumerate(batch_pos_inds)])
+            [pos_inds + self.num_query * batch_id for batch_id, pos_inds in enumerate(batch_pos_inds)])
         # batch_pos_bids = torch.cat(
         #     [torch.full_like(pos_inds, batch_id) for batch_id, pos_inds in enumerate(batch_pos_inds)])
         num_batch_pos = batch_pos_binds.size(0)
@@ -824,7 +753,7 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         batch_bboxes3d_targets = torch.cat(batch_bboxes3d_targets, dim=0)
         if self.dense_assign:
             batch_pos_dnbinds = torch.cat(
-                [pos_inds + cls_out.size(1) * batch_id for batch_id, pos_inds in enumerate(batch_pos_dninds)])
+                [pos_inds + self.num_query * batch_id for batch_id, pos_inds in enumerate(batch_pos_dninds)])
             num_batch_dnpos = batch_pos_dnbinds.size(0)
             batch_labels_dntargets = torch.cat(batch_labels_dntargets, dim=0)
             batch_bboxes3d_dntargets = torch.cat(batch_bboxes3d_dntargets, dim=0)
@@ -838,18 +767,14 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         loss_cls = self.loss_cls(
             cls_out, batch_labels_targets,
             weight=batch_labels_weight,
-            avg_factor=max(num_batch_pos, 1)
+            avg_factor=num_batch_pos * 1.0 + (cls_out.size(0) - num_batch_pos) * self.bg_cls_weight
         )
-        mae_poscls = (cls_out[batch_pos_binds].max(-1)[1]==batch_labels_targets[batch_pos_binds]).float().mean()
-        mae_cls = (cls_out.max(-1)[1]==batch_labels_targets).float().mean()
         if num_batch_pos > 0:
             bboxes3d_pos = batch_bboxes3d_targets
             labels_pos = batch_labels_targets[batch_pos_binds]
             reg_pos = reg_out[batch_pos_binds]
             reg_xyz_pos = reg_pos[..., :3]
             # reg_dim_pos = reg_pos[:, 3:6]
-            # reg_roty_pos = self.alpha2roty(reg_pos[:, 6:8], self.normxyz2xyzrange(reg_pos[:,:3]))
-            reg_roty_pos = reg_pos[:,6:]
             reg_dim_pos = reg_pos[:, 3:6]  # * self.canon_box_sizes[labels_pos]
             reg_bboxes3d_xyz = torch.cat([reg_xyz_pos, bboxes3d_pos[..., 3:6], bboxes3d_pos[..., 6:]], dim=-1)
             reg_bboxes3d_dim = torch.cat([bboxes3d_pos[:, :3], reg_dim_pos, bboxes3d_pos[:, 6:]], dim=-1)
@@ -867,11 +792,10 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
                 avg_factor=max(num_batch_pos, 1)
             )
             loss_roty = self.loss_dir(
-                reg_roty_pos,#reg_pos[:, 6:],
+                reg_pos[:, 6:],
                 bboxes3d_pos[:, 6],
                 avg_factor=max(num_batch_pos, 1)
             )
-            loss_roty_norm = (torch.norm(reg_pos[:, 6:], dim=-1) - 1).abs().mean()  # L2 norm
             pred_bboxes = self.get_gt_from_reg(reg_pos, labels_pos)
             gt_bboxes = self.get_gt_from_reg(bboxes3d_pos, labels_pos)
             mae_xyz = (pred_bboxes[:, :3] - gt_bboxes[:, :3]).abs().mean()
@@ -880,20 +804,19 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
             if not dn:
                 print(cls_out[batch_pos_binds][:3].sigmoid().detach().cpu().numpy().tolist(),
                       labels_pos[:3])
-                print(cls_out[:3].sigmoid().detach().cpu().numpy().tolist(),
-                      batch_labels_targets[:3])
                 print(pred_bboxes[0].detach().cpu().numpy().tolist())
                 print(gt_bboxes[0].detach().cpu().numpy().tolist())
         else:
             loss_xyz = reg_out.sum() * 0
             loss_dim = loss_xyz
             loss_roty = loss_xyz
-            loss_roty_norm = loss_xyz
+            # loss_roty_norm = loss_xyz
             # loss_reg_xyzdim = loss_xyz
             mae_xyz = loss_xyz
             mae_dim = loss_xyz
             mae_roty = loss_xyz
         # loss_roty_norm = (torch.sum(reg_out[:, 6:] ** 2, dim=-1) - 1).abs().mean()
+        loss_roty_norm = (torch.norm(reg_out[:, 6:], dim=-1) - 1).abs().mean()  # L2 norm
 
         if not dn and self.dense_assign and num_batch_dnpos > 0:
             reg_dnout = reg_out
@@ -910,32 +833,40 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
             #     [reg_xyz_dnpos, reg_dim_dnpos, torch.atan2(reg_dnpos[..., 6:7], reg_dnpos[..., 7:8])],
             #     dim=-1)
 
-            loss_dnxyz = self.loss_reg(
-                decode_bboxes3d_dnxyz[:, [0,2]],
-                bboxes3d_dnpos[:, [0,2]],
-                weight=dn_reg_weight.unsqueeze(-1).repeat(1, 2),
+            loss_dnxyz = self.loss_iou3d(
+                decode_bboxes3d_dnxyz,
+                bboxes3d_dnpos,
+                weight=dn_reg_weight,
+                avg_factor=max(num_batch_dnpos, 1)
+            ) + self.loss_reg(
+                decode_bboxes3d_dnxyz[:, :3],
+                bboxes3d_dnpos[:, :3],
+                weight=dn_reg_weight.unsqueeze(-1).repeat(1, 3),
                 avg_factor=max(num_batch_dnpos, 1)
             )
-            # loss_dndim = self.loss_reg(
-            #     decode_bboxes3d_dndim[:, 3:6],
-            #     bboxes3d_dnpos[:, 3:6],
-            #     weight=dn_reg_weight.unsqueeze(-1).repeat(1, 3),
-            #     avg_factor=max(num_batch_dnpos, 1)
-            # )
-            # loss_dnroty = self.loss_dir(
-            #     reg_dnpos[:, 6:],
-            #     bboxes3d_dnpos[:, 6],
-            #     weight=dn_reg_weight,
-            #     avg_factor=max(num_batch_dnpos, 1)
-            # )
-            loss_dndim = loss_xyz * 0
-            loss_dnroty = loss_dndim
+            loss_dndim = self.loss_iou3d(
+                decode_bboxes3d_dndim,
+                bboxes3d_dnpos,
+                weight=dn_reg_weight,
+                avg_factor=max(num_batch_dnpos, 1)
+            ) + self.loss_reg(
+                decode_bboxes3d_dndim[:, 3:6],
+                bboxes3d_dnpos[:, 3:6],
+                weight=dn_reg_weight.unsqueeze(-1).repeat(1, 3),
+                avg_factor=max(num_batch_dnpos, 1)
+            )
+            loss_dnroty = self.loss_dir(
+                reg_dnpos[:, 6:],
+                bboxes3d_dnpos[:, 6],
+                weight=dn_reg_weight,
+                avg_factor=max(num_batch_dnpos, 1)
+            )
         else:
-            loss_dnxyz = loss_xyz * 0
+            loss_dnxyz = loss_cls * 0
             loss_dndim = loss_dnxyz
             loss_dnroty = loss_dnxyz
         if not dn:
-            print(self.xyz_prior[0,:3,0],mae_cls,mae_poscls,mae_xyz, mae_dim, mae_roty)
+            print(mae_xyz, mae_dim, mae_roty)
         losses = dict(
             loss_cls=loss_cls,
             loss_xyz=loss_xyz,
@@ -948,8 +879,6 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
             mae_xyz=mae_xyz,
             mae_dim=mae_dim,
             mae_roty=mae_roty,
-            mae_cls=mae_cls,
-            mae_poscls=mae_poscls,
         )
         for k, v in losses.items():
             losses[prefix + k] = losses.pop(k)

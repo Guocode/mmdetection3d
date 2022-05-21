@@ -117,7 +117,7 @@ class DenseAssigner3D(BaseAssigner):
 
     def __init__(self,
                  cls_cost=dict(type='ClassificationCost', weight=1.),
-                 iou_cost=dis_3d_cost, cycassign_decay=1/math.e):
+                 iou_cost=dis_3d_cost, cycassign_decay=0.7):
         self.cls_cost = build_match_cost(cls_cost)
         self.iou_cost = iou_cost
         self.cycassign_decay = cycassign_decay
@@ -187,7 +187,8 @@ class DenseAssigner3D(BaseAssigner):
         # bbox_pred = torch.cat([bbox_pred[:,:6],torch.atan2(bbox_pred[:,6:7],bbox_pred[:,7:8])],dim=-1)
         iou_cost = self.iou_cost(bbox_pred, gt_bboxes)
         # weighted sum of above three costs
-        cost = cls_cost + iou_cost  # (-1,0)+(-1,1)#TODO dense cost only use iou cost
+        l1_cost  = torch.cdist(bbox_pred[:,:3], gt_bboxes[:,:3], p=1)
+        cost = cls_cost + l1_cost
         cost_ = cost.detach().cpu().clone()
         # 3. do Hungarian matching on CPU using linear_sum_assignment
         assigned_num = 0
@@ -197,7 +198,7 @@ class DenseAssigner3D(BaseAssigner):
             raise ImportError('Please run "pip install scipy" '
                               'to install scipy first.')
         # cycled assign until all preds are assigned
-        while assigned_num < bbox_pred.size(0)//2 and assigned_cyc<4:
+        while assigned_num < bbox_pred.size(0):
             matched_row_inds, matched_col_inds = linear_sum_assignment(cost_)
             matched_row_inds = torch.from_numpy(matched_row_inds).to(
                 bbox_pred.device)

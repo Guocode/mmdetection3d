@@ -107,7 +107,7 @@ class HungarianAssigner3D(BaseAssigner):
     """
 
     def __init__(self,
-                 cls_cost=dict(type='ClassificationCost', weight=1.),
+                 cls_cost=dict(type='ClassificationCost', weight=0.1),
                  iou_cost=dis_3d_cost):
         self.cls_cost = build_match_cost(cls_cost)
         self.iou_cost = iou_cost
@@ -174,9 +174,10 @@ class HungarianAssigner3D(BaseAssigner):
         cls_cost = self.cls_cost(cls_pred, gt_labels)
         # regression iou cost, defaultly giou is used in official DETR.
         # bbox_pred = torch.cat([bbox_pred[:,:6],torch.atan2(bbox_pred[:,6:7],bbox_pred[:,7:8])],dim=-1)
-        iou_cost = self.iou_cost(bbox_pred, gt_bboxes)
+        # iou_cost = self.iou_cost(bbox_pred, gt_bboxes)
         # weighted sum of above three costs
-        cost = cls_cost + iou_cost
+        l1_cost  = torch.cdist(bbox_pred[:,:3], gt_bboxes[:,:3], p=1)
+        cost = cls_cost + l1_cost
 
         # 3. do Hungarian matching on CPU using linear_sum_assignment
         cost = cost.detach().cpu()
