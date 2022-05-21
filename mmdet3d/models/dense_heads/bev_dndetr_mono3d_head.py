@@ -198,10 +198,13 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         self.xrange = (-zrange[1] * 640 / 710, zrange[1] * 640 / 710)  # xrange
         self.xrange_min = (-zrange[0] * 640 / 710, zrange[0] * 640 / 710)  # xrange
 
-        self.yrange = yrange
+        # self.yrange = yrange
+        self.yrange = (-zrange[1] * 192 / 710, zrange[1] * 192 / 710)
+        self.yrange_min = (-zrange[0] * 192 / 710, zrange[0] * 192 / 710)
+
         self.zrange = zrange
         self.register_buffer('xyzrange',
-                             torch.asarray([xrange, yrange, zrange, self.xrange_min], dtype=torch.float32))  # (3,2)
+                             torch.asarray([self.xrange, self.yrange, zrange, self.xrange_min,self.yrange_min], dtype=torch.float32))  # (3,2)
         self.bev_prior_size = bev_prior_size
         # self.num_query_sqrt = num_query_sqrt
         # self.num_query = num_query_sqrt ** 2
@@ -221,7 +224,15 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         self.dense_assign = False
         self.in_h = 2
         self.in_w = 2
-        self.xyz_prior = nn.Parameter(torch.normal(0,0.1,(1,12*40,3)),requires_grad=True)
+        x_prior = torch.arange(0,40,device='cuda')/39*2-1
+        y_prior = torch.arange(0,12,device='cuda')/11*2-1
+        z_prior = torch.zeros((12,40),device='cuda')
+        y_prior,x_prior = torch.meshgrid(y_prior,x_prior)
+        xyz_prior = torch.stack([x_prior,y_prior,z_prior])[None]
+        # self.z_prior = torch.arange(0,12,device='cuda')/12*2-1
+        self.register_buffer('xyz_prior',xyz_prior.reshape(1,3,-1).permute(0,2,1))  # (3,2)
+        # self.register_buffer('z_prior',)  # (3,2)
+
         if self.train_cfg:
             self.assigner = build_assigner(self.train_cfg.assigner)
             if self.dense_assign:
@@ -407,8 +418,10 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         '''
         shape = normxyz.shape
         normxyz = normxyz.reshape(-1, 3) * 0.5 + 0.5
-        yr = normxyz[:, 1:2] * (self.xyzrange[1:2, 1] - self.xyzrange[1:2, 0])[None] + self.xyzrange[1:2, 0][None]
         zr = normxyz[:, 2:3] * (self.xyzrange[2:3, 1] - self.xyzrange[2:3, 0])[None] + self.xyzrange[2:3, 0][None]
+        cyr = self.xyzrange[4][None] + (self.xyzrange[1] - self.xyzrange[4])[None] * normxyz[:, 2:3]
+        # yr = normxyz[:, 1:2] * (self.xyzrange[1:2, 1] - self.xyzrange[1:2, 0])[None] + self.xyzrange[1:2, 0][None]
+        yr = normxyz[:, 1:2] * (cyr[:, 1:2] - cyr[:, 0:1]) + cyr[:, 0:1]
         cxr = self.xyzrange[3][None] + (self.xyzrange[0] - self.xyzrange[3])[None] * normxyz[:, 2:3]
         xr = normxyz[:, 0:1] * (cxr[:, 1:2] - cxr[:, 0:1]) + cxr[:, 0:1]
         xyzr = torch.cat([xr, yr, zr], dim=-1)
@@ -422,8 +435,12 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         '''
         shape = xyzrange.shape
         xyzrange = xyzrange.reshape(-1, 3)
-        yn = (xyzrange[:, 1:2] - self.xyzrange[1:2, 0][None]) / (self.xyzrange[1:2, 1] - self.xyzrange[1:2, 0])[None]
         zn = (xyzrange[:, 2:3] - self.xyzrange[2:3, 0][None]) / (self.xyzrange[2:3, 1] - self.xyzrange[2:3, 0])[None]
+        cyr = self.xyzrange[4][None] + (self.xyzrange[1] - self.xyzrange[4])[None] * zn
+
+        # yn = (xyzrange[:, 1:2] - self.xyzrange[1:2, 0][None]) / (self.xyzrange[1:2, 1] - self.xyzrange[1:2, 0])[None]
+        yn = (xyzrange[:, 1:2] - cyr[:, 0:1]) / (cyr[:, 1:2] - cyr[:, 0:1])
+
         cxr = self.xyzrange[3][None] + (self.xyzrange[0] - self.xyzrange[3])[None] * zn
         xn = (xyzrange[:, 0:1] - cxr[:, 0:1]) / (cxr[:, 1:2] - cxr[:, 0:1])
         xyzn = torch.cat([xn, yn, zn], dim=-1) * 2 - 1.
@@ -506,7 +523,8 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         cls_out = cls_out.view(b, nq, self.num_classes + 1)
         b, nq, c = reg_out.shape
         reg_out = reg_out.view(b, nq, sum(self.group_reg_dims))
-        reg_xyz_out = reg_out[..., 0:3].clamp(-1.5, 1.5)+self.xyz_prior  # (-1,1)
+        reg_xyz_out = torch.tanh(reg_out[..., 0:3])
+        reg_xyz_out = torch.cat([reg_xyz_out[..., 0:1]/w,reg_xyz_out[..., 1:2]/h,reg_xyz_out[..., 2:3]],dim=-1)+self.xyz_prior  # (-1,1)
         reg_dim_out = torch.tanh(reg_out[..., 3:6])  # .clamp(-1.,1.)  # (0,2)
         reg_roty_out = reg_out[..., 6:8]  # -1,1
         #self.alpha2roty(reg_out[..., 6:8],self.normxyz2xyzrange(reg_xyz_out))
@@ -528,7 +546,7 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
             #     [self.normxyz2xyzrange(reg_pos[:, :3]), bboxes3d_dim, torch.atan2(reg_pos[:, 6:7], reg_pos[:, 7:8])],
             #     dim=-1)
             bboxes3d = self.get_gt_from_reg(reg_pos, labels)
-            bboxes3d = CameraInstance3DBoxes(bboxes3d, box_dim=7, origin=(0.5, 1.0, 0.5))
+            bboxes3d = CameraInstance3DBoxes(bboxes3d, box_dim=7, origin=(0.5, 0.5, 0.5))
             bboxes2d = torch.cat(
                 [torch.zeros((scores.size(0), 4), dtype=scores.dtype, device=scores.device), scores.view(-1, 1)],
                 dim=-1)
@@ -641,19 +659,19 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
         device = cls_out.device
         num_query = cls_out.size(0)
         if isinstance(gt_bboxes_3d, CameraInstance3DBoxes):  # target bbox3d with gravity center and alpha
-            gt_bboxes_3d = torch.cat([gt_bboxes_3d.tensor[:,:6], gt_bboxes_3d.local_yaw[...,None]],dim=-1)
+            gt_bboxes_3d = torch.cat([gt_bboxes_3d.gravity_center,gt_bboxes_3d.dims, gt_bboxes_3d.local_yaw[...,None]],dim=-1)
             gt_bboxes_3d = gt_bboxes_3d.to(device)
         gt_bboxes_3d_ass_xyz = self.xyzrange2normxyz(gt_bboxes_3d[:, :3])
         gt_bboxes_3d_ass_xyz = torch.cat(
-            [gt_bboxes_3d_ass_xyz[:, :1], gt_bboxes_3d_ass_xyz[:, 1:2] - gt_bboxes_3d_ass_xyz[:, 1:2],
-             gt_bboxes_3d_ass_xyz[:, 2:3]], dim=-1)
+            [gt_bboxes_3d_ass_xyz[:, :1], gt_bboxes_3d_ass_xyz[:, 1:2],
+             gt_bboxes_3d_ass_xyz[:, 2:3]-gt_bboxes_3d_ass_xyz[:, 2:3]], dim=-1)
         gt_bboxes_3d_ass_dim = gt_bboxes_3d[:, 3:6] / gt_bboxes_3d[:, 3:6] / 60
         gt_bboxes_3d_ass_roty = gt_bboxes_3d[:, 6:] - gt_bboxes_3d[:, 6:]
         gt_bboxes_3d_ass = torch.cat([gt_bboxes_3d_ass_xyz, gt_bboxes_3d_ass_dim, gt_bboxes_3d_ass_roty], dim=-1)
 
         decode_ass_xyz = decode_bboxes3d[:, :3]
         decode_ass_xyz = torch.cat(
-            [decode_ass_xyz[:, :1], decode_ass_xyz[:, 1:2] - decode_ass_xyz[:, 1:2], decode_ass_xyz[:, 2:3]], dim=-1)
+            [decode_ass_xyz[:, :1], decode_ass_xyz[:, 1:2], decode_ass_xyz[:, 2:3]-decode_ass_xyz[:, 2:3]], dim=-1)
         decode_ass_dim = decode_bboxes3d[:, 3:6] / decode_bboxes3d[:, 3:6] / 60  # / 30  # / decode_bboxes3d[:, 3:6]
         decode_ass_roty = decode_bboxes3d[:, 6:] - decode_bboxes3d[:, 6:]
         decode_bboxes3d_ass = torch.cat([decode_ass_xyz, decode_ass_dim, decode_ass_roty], dim=-1)
@@ -935,7 +953,7 @@ class BEVDNDETRMono3DHead(BaseMono3DDenseHead):
             loss_dndim = loss_dnxyz
             loss_dnroty = loss_dnxyz
         if not dn:
-            print(self.xyz_prior[0,:3,0],mae_cls,mae_poscls,mae_xyz, mae_dim, mae_roty)
+            print(mae_cls,mae_poscls,mae_xyz, mae_dim, mae_roty)
         losses = dict(
             loss_cls=loss_cls,
             loss_xyz=loss_xyz,

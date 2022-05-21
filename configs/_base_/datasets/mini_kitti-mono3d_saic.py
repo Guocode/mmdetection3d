@@ -21,9 +21,9 @@ train_pipeline = [
     #     saturation_range=(0.5, 1.5),
     #     hue_delta=18),
     # dict(type='RandomFlip3D', flip_ratio_bev_horizontal=0.5),
-    dict(type='Normalize', **img_norm_cfg),
     dict(type='NormIntrinsic', focal_length=710 // 2, norm_principal_point_offset=True, dst_size=(1280 // 2, 384 // 2)),
     dict(type='AffineResize3D', dst_size=(1280 // 2, 384 // 2)),
+    dict(type='Normalize', **img_norm_cfg),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
     dict(
         type='Collect3D',
@@ -36,14 +36,16 @@ test_pipeline = [
     dict(type='LoadImageFromFileMono3D'),
     dict(
         type='MultiScaleFlipAug',
-        img_scale=(1242, 375),
+        scale_factor=1.0,
         flip=False,
         transforms=[
             # dict(type='RandomFlip3D'),
+            dict(type='NormIntrinsic', focal_length=710 // 2, norm_principal_point_offset=True,
+                 dst_size=(1280 // 2, 384 // 2)),
+            dict(type='AffineResize3D', dst_size=(1280 // 2, 384 // 2), affine_labels=False),
+            # dict(type='Pad', size_divisor=32),
+
             dict(type='Normalize', **img_norm_cfg),
-            # dict(type='NormIntrinsic', focal_length=710, norm_principal_point_offset=False, dst_size=(1248, 384)),
-            # dict(type='AffineResize3D', dst_size=(1248, 384),affine_labels=False),
-            dict(type='PadBorders', size_divisor=32,affine_label=False),
             dict(
                 type='DefaultFormatBundle3D',
                 class_names=class_names,

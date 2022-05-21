@@ -177,7 +177,7 @@ class HungarianAssigner3D(BaseAssigner):
         # iou_cost = self.iou_cost(bbox_pred, gt_bboxes)
         # weighted sum of above three costs
         l1_cost  = torch.cdist(bbox_pred[:,:3], gt_bboxes[:,:3], p=1)
-        cost = cls_cost + l1_cost
+        cost = l1_cost
 
         # 3. do Hungarian matching on CPU using linear_sum_assignment
         cost = cost.detach().cpu()

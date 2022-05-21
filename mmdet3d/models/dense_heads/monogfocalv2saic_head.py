@@ -104,14 +104,15 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
                  num_classes,
                  in_channels,
                  loss_dfl=dict(type='DistributionFocalLoss', loss_weight=0.25),
-                 loss_gc3d=dict(type='SmoothL1Loss'),
-                 loss_offset2c3d=dict(type='SmoothL1Loss'),
-                 loss_depth=dict(type='UncertainSmoothL1Loss'),
-                 loss_dim=dict(type='SmoothL1Loss'),
+                 loss_gc3d=dict(type='SmoothL1Loss', beta=0.05),
+                 loss_offset2c3d=dict(type='SmoothL1Loss', beta=0.05),
+                 loss_depth=dict(type='SmoothL1Loss', beta=0.05),
+                 loss_dim=dict(type='SmoothL1Loss', beta=0.05),
                  loss_dir=dict(type='DirCosineLoss'),
                  loss_iou3d=dict(type='DIOU3DLoss'),
                  reg_max=16,
                  depth_reg_max=32,
+                 depth_max=80,
                  reg_topk=4,
                  reg_channels=64,
                  add_mean=True,
@@ -128,6 +129,7 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
         self.aux_reg = aux_reg
         self.bbox3d_code_size = bbox3d_code_size
         self.depth_reg_max = depth_reg_max
+        self.depth_max = depth_max
         self.depth_exprg = depth_exprg
         if add_mean:
             self.total_dim += 1
@@ -234,9 +236,9 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
 
     def _init_canon_box_sizes(self):
         self.register_buffer('canon_box_sizes', torch.asarray(
-            [[0.62806586, 0.82038497, 1.76784787],  # Pedestrian
+            [[1.61876949, 3.89154523, 1.52969237],  # Car
+             [0.62806586, 0.82038497, 1.76784787],  # Pedestrian
              [0.56898187, 1.77149234, 1.7237099],  # Cyclist
-             [1.61876949, 3.89154523, 1.52969237],  # Car
              [1.9134491, 5.15499603, 2.18998422],  # Van
              [2.61168401, 9.22692319, 3.36492722],  # Truck
              [0.5390196, 1.08098042, 1.28392158],  # Person_sitting
@@ -335,13 +337,16 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
             cls_score = self.gfl_cls(cls_feat) * quality_score
             # cls_score = self.gfl_cls(cls_feat) * quality_score
             # 3D
-            offset2c3d_pred = self.scales3d_offset2c3d[lvlid](self.offset2c3d_reg(reg3d_feat))
+            # offset2c3d_pred = self.scales3d_offset2c3d[lvlid](self.offset2c3d_reg(reg3d_feat))
+            offset2c3d_pred = self.offset2c3d_reg(reg3d_feat)
+
             depth_dist_pred = self.depth_reg(reg3d_feat)
             depth_pred = self.depth_intergral(
                 depth_dist_pred.permute(0, 2, 3, 1).reshape(N, H, W, 1, self.depth_reg_max + 1)).permute(0, 3, 1, 2)
-            depth_pred = torch.exp(self.bias3d_depth[lvlid](self.scales3d_depth[lvlid](depth_pred / self.depth_reg_max * self.depth_exprg)))
-            dim_pred = self.dim_reg(reg3d_feat)
-            dir_pred = F.normalize(self.dir_reg(reg3d_feat), dim=1)
+            depth_pred = depth_pred / self.depth_reg_max * self.depth_max  # 0-depth_reg_max
+
+            dim_pred = torch.tanh(self.dim_reg(reg3d_feat))
+            dir_pred = self.dir_reg(reg3d_feat)
             # depth_pred[:, 0, :, :] = self.bias3d_depth[lvlid](self.scales3d_depth[lvlid](
             #     1. / (depth_pred[:, 0, :, :].sigmoid() + EPS) - 1))
 
@@ -439,7 +444,7 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
     def get_bboxes(self,
                    out_cls_scores, out_bbox_dist_preds, out_bbox_preds, out_offset2c3d_preds, \
                    out_depth_dist_preds, out_depth_preds, out_dim_preds, out_dir_preds,
-                   img_metas, thresh=0.4):
+                   img_metas, thresh=0.35):
         """Decode the outputs to bboxes.
         Args:
             cls_preds (Tensor): Shape (num_imgs, num_points, num_classes).
@@ -490,9 +495,9 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
                                                                                                                 self.bbox3d_code_size)[
                 inds]
             cam2imgs = img_metas[i]['cam2img'][None,].to(device)
-            bbox3d = self.decode_bbox3d(bbox3d, cam2imgs.repeat([bbox3d.size(0), 1, 1]))
+            bbox3d = self.decode_bbox3d(bbox3d, cls, cam2imgs.repeat([bbox3d.size(0), 1, 1]))
             bbox3d = CameraInstance3DBoxes(bbox3d, box_dim=self.bbox3d_code_size, origin=(0.5, 0.5, 0.5))
-            result_list.append([bbox, cls, bbox3d])
+            result_list.append([bbox, bbox3d,cls])
         return result_list
 
     def get_targets(self, cls_preds, multi_lvl_ltcenter_priors, decoded_bboxes, gt_bboxes, gt_labels, gt_bboxes3d,
@@ -571,34 +576,37 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
             single_img_label_scores[pos_inds] = pos_ious
             # single_img_label_scores3d[pos_inds] = pos_ious#TODO 3d iou
             single_img_bbox3d_targets = pos_gt_bboxes3d
-            lvl_inds = [self.strides.index(stride) for stride in center_priors[pos_inds, 2]]
-            single_img_depth_dist_targets = [
-                (torch.log(pos_gt_bboxes3d[pos_ind, 2:3].clamp(0.1, 300)) - self.bias3d_depth[lvl].bias.detach())/self.depth_exprg*self.reg_max/self.scales3d_depth[lvl].scale.detach()
-
-                for pos_ind, lvl in enumerate(lvl_inds)]
-            print(self.bias3d_depth[1].bias, self.scales3d_depth[1].scale)
-            single_img_depth_dist_targets = torch.cat(single_img_depth_dist_targets).clamp(min=0,
-                                                                                           max=self.depth_reg_max - 0.1)
+            # lvl_inds = [self.strides.index(stride) for stride in center_priors[pos_inds, 2]]
+            # single_img_depth_dist_targets = [
+            #     (torch.log(pos_gt_bboxes3d[pos_ind, 2:3].clamp(0.1, 300)) - self.bias3d_depth[
+            #         lvl].bias.detach()) / self.depth_exprg * self.reg_max / self.scales3d_depth[lvl].scale.detach()
+            #     for pos_ind, lvl in enumerate(lvl_inds)]
+            single_img_depth_dist_targets = pos_gt_bboxes3d[:, 2:3] / self.depth_max * self.depth_reg_max
+            # print(self.bias3d_depth[1].bias, self.scales3d_depth[1].scale)
+            single_img_depth_dist_targets = single_img_depth_dist_targets.clamp(min=0,max=self.depth_reg_max - 0.1)
             single_img_kpts2d_targets = pos_gt_kpts2d
             single_img_kpts2d_valid_targets = pos_gt_kpts2d_valid
             single_img_pos_inds = pos_inds
         return single_img_labels, single_img_label_scores, single_img_bbox_targets, single_img_dist_targets, \
                single_img_bbox3d_targets, single_img_depth_dist_targets, single_img_kpts2d_targets, single_img_kpts2d_valid_targets, single_img_pos_inds
 
-    def decode_bbox3d(self, bbox3d, cam2img):
+    def decode_bbox3d(self, bbox3d, cls, cam2img):
         '''
-        alpha to roty
         2d+depth to 3d
+        tanh dim to dim
+        alpha to roty
         :param bbox3d: [N,7]
+        :param cls: [N,]
         :param cam2img: [N,3,3]
         :return:
         '''
-        # 1. alpha -> roty
-        bbox3d[:, 6] = (bbox3d[:, 6] + torch.atan2(bbox3d[:, 0] - cam2img[:, 0, 2], cam2img[:, 0, 0]) + PI) % (
+        #  2d+depth -> 3d
+        bbox3d_xyz = self.pts2Dto3D(bbox3d[:, :3], cam2img)
+        bbox3d_dims = torch.exp(bbox3d[:, 3:6]) * self.canon_box_sizes[cls]
+        #  alpha -> roty
+        bbox3d_roty = (bbox3d[:, 6:] + torch.atan2(bbox3d[:, 0:1] - cam2img[:, 0, 2], cam2img[:, 0, 0]) + PI) % (
                 PI * 2) - PI
-        # 2. 2d+depth -> 3d
-        bbox3d[:, :3] = self.pts2Dto3D(bbox3d[:, :3], cam2img)
-        return bbox3d
+        return torch.cat([bbox3d_xyz,bbox3d_dims,bbox3d_roty],dim=-1)
 
     def encode_bbox3d(self, bbox3d):
         '''
@@ -766,37 +774,39 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
             decoded_gc3d = self.pts2Dto3D(
                 torch.cat([decoded_pc3d[batch_pos_binds], out_depth_preds[batch_pos_binds]], dim=-1),
                 cam2imgs[batch_pos_bids])  # gravity center
-            decoded_gc3d_c3d = self.pts2Dto3D(
-                torch.cat([decoded_pc3d[batch_pos_binds], batch_bbox3d_targets[:, 2:3]], dim=-1),
-                cam2imgs[batch_pos_bids])  # gravity center
-            decoded_gc3d_depth = torch.cat([batch_bbox3d_targets[:, 0:2], out_depth_preds[batch_pos_binds]], dim=-1)
+            # decoded_gc3d_c3d = self.pts2Dto3D(
+            #     torch.cat([decoded_pc3d[batch_pos_binds], batch_bbox3d_targets[:, 2:3]], dim=-1),
+            #     cam2imgs[batch_pos_bids])  # gravity center
+            # decoded_gc3d_depth = torch.cat([batch_bbox3d_targets[:, 0:2], out_depth_preds[batch_pos_binds]], dim=-1)
+            out_dim_pos = torch.exp(out_dim_preds[batch_pos_binds]) * self.canon_box_sizes[
+                batch_labels[batch_pos_binds]]
             out_dir_pos = out_dir_preds[batch_pos_binds]
             out_dir_rad_pos = torch.atan2(out_dir_pos[..., 0:1], out_dir_pos[..., 1:])
-            out_dim_pos = (torch.tanh(out_dim_preds[batch_pos_binds]) + 1) * self.canon_box_sizes[
-                batch_labels[batch_pos_binds]]
-            decoded_bboxes3d = torch.cat([decoded_gc3d, out_dim_pos, out_dir_rad_pos],
-                                         dim=-1)  # not opt alpha
+            decoded_bboxes3d = torch.cat([decoded_gc3d, out_dim_pos, out_dir_rad_pos], dim=-1)  # not opt alpha
             # batch_iou3d = torch.nan_to_num(diff_iou_rotated_3d(decoded_bboxes3d[None, ...], batch_bbox3d_targets[None, ...]).squeeze(0), 0)
 
-            decoded_bboxes3d_wodir = torch.cat([decoded_gc3d, out_dim_pos, batch_bbox3d_targets[:, 6:]],
-                                               dim=-1)  # not opt alpha
-            decoded_bboxes3d_c3d = torch.cat(
-                [decoded_gc3d_c3d, batch_bbox3d_targets[:, 3:6], batch_bbox3d_targets[:, 6:]], dim=-1)
-            decoded_bboxes3d_depth = torch.cat(
-                [decoded_gc3d_depth, batch_bbox3d_targets[:, 3:6], batch_bbox3d_targets[:, 6:]], dim=-1)
-            decoded_bboxes3d_dim = torch.cat([batch_bbox3d_targets[:, :3], out_dim_pos, batch_bbox3d_targets[:, 6:]],
-                                             dim=-1)
+            # decoded_bboxes3d_wodir = torch.cat([decoded_gc3d, out_dim_pos, batch_bbox3d_targets[:, 6:]],
+            #                                    dim=-1)  # not opt alpha
+            # decoded_bboxes3d_c3d = torch.cat(
+            #     [decoded_gc3d_c3d, batch_bbox3d_targets[:, 3:6], batch_bbox3d_targets[:, 6:]], dim=-1)
+            # decoded_bboxes3d_depth = torch.cat(
+            #     [decoded_gc3d_depth, batch_bbox3d_targets[:, 3:6], batch_bbox3d_targets[:, 6:]], dim=-1)
+            # decoded_bboxes3d_dim = torch.cat([batch_bbox3d_targets[:, :3], out_dim_pos, batch_bbox3d_targets[:, 6:]],
+            #                                  dim=-1)
             # decoded_bboxes3d_dir = torch.cat(
             #     [batch_bbox3d_targets[:, :3], batch_bbox3d_targets[:, 3:6], out_dir_rad_pos], dim=-1)
-            print(decoded_bboxes3d[0], decoded_bboxes[batch_pos_binds][0])
-            batch_diou3d = diou_3d_loss(decoded_bboxes3d_wodir, batch_bbox3d_targets, reduction='none')
-            batch_label_scores3d = torch.exp(-batch_diou3d * self.temperature_scores3d)
-            batch_label_scores[batch_pos_binds] = batch_label_scores[batch_pos_binds] * batch_label_scores3d.detach()
+            print('000:', decoded_bboxes3d[0], )
+            print('111:', batch_bbox3d_targets[0], )
+            print('222:', decoded_bboxes[batch_pos_binds][0])
+            print('333:', batch_bbox_targets[0])
+            # batch_diou3d = diou_3d_loss(decoded_bboxes3d_wodir, batch_bbox3d_targets, reduction='none')
+            # batch_label_scores3d = torch.exp(-batch_diou3d * self.temperature_scores3d)
+            batch_label_scores[batch_pos_binds] = batch_label_scores[batch_pos_binds]  # * batch_label_scores3d.detach()
             loss_qfl = self.loss_cls(
-                out_cls_scores, (batch_labels, batch_label_scores), avg_factor=max(num_batch_pos,1)
+                out_cls_scores, (batch_labels, batch_label_scores), avg_factor=max(num_batch_pos, 1)
             )
-            print(batch_label_scores[batch_pos_binds][0], batch_label_scores3d[0], out_cls_scores[batch_pos_binds][0],
-                  num_batch_pos)
+            print('444:', out_cls_scores[batch_pos_binds][0])
+            print('555:', batch_label_scores[batch_pos_binds][0])
             weight_targets = out_cls_scores[batch_pos_binds].detach().max(dim=1)[0]
             bbox_avg_factor = max(reduce_mean(weight_targets.sum()).item(), 1.0)
             loss_bbox = self.loss_bbox(
@@ -811,12 +821,12 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
                 weight=weight_targets[:, None].expand(-1, 4).reshape(-1),
                 avg_factor=4.0 * bbox_avg_factor,
             )
-            # loss_gc3d = self.loss_gc3d(
-            #     decoded_gc3d.reshape(-1, 3),
-            #     batch_bbox3d_targets[..., :3].reshape(-1, 3),
-            #     weight=weight_targets[:, None].expand(-1, 3).reshape(-1, 3),
-            #     avg_factor=3.0 * bbox_avg_factor,
-            # )
+            loss_gc3d = self.loss_gc3d(  # depth+2d sup
+                decoded_gc3d.reshape(-1, 3),
+                batch_bbox3d_targets[..., :3].reshape(-1, 3),
+                # weight=weight_targets[:, None].expand(-1, 3).reshape(-1, 3),
+                avg_factor=num_batch_pos  # 3.0 * bbox_avg_factor,
+            )
             # loss_gc3d = out_bbox_dist_preds.sum() * 0
             # loss_offset2c3d = self.loss_offset2c3d(
             #     decoded_pc3d[batch_pos_binds].reshape(-1, 2),
@@ -829,76 +839,81 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
                 out_depth_dist_preds[batch_pos_binds].reshape(-1, self.depth_reg_max + 1),
                 batch_depth_dist_targets.reshape(-1),
                 # weight=weight_targets,
-                avg_factor=bbox_avg_factor,
+                avg_factor=num_batch_pos  # bbox_avg_factor,
             )
-            # loss_dim = self.loss_dim(
-            #     out_dim_preds[batch_pos_binds].reshape(-1, 3),
-            #     batch_bbox3d_targets[..., 3:6].reshape(-1, 3),
-            #     weight=weight_targets[:, None].expand(-1, 3).reshape(-1, 3),
-            #     avg_factor=3.0 * bbox_avg_factor,
+            # loss_depth = self.loss_depth(
+            #
             # )
+            loss_dim = self.loss_dim(
+                out_dim_pos.reshape(-1, 3),
+                batch_bbox3d_targets[..., 3:6].reshape(-1, 3),
+                # weight=weight_targets[:, None].expand(-1, 3).reshape(-1, 3),
+                avg_factor=num_batch_pos  # 3.0 * bbox_avg_factor,
+            )
             # loss_dim = out_bbox_dist_preds.sum() * 0
             # batch_alpha_targets = -torch.atan2(batch_bbox3d_targets[..., 0], batch_bbox3d_targets[..., 2]) + \
             #                       batch_bbox3d_targets[..., 6]
-            batch_alpha_targets = batch_bbox3d_targets[..., 6]
+            # batch_alpha_targets =
             loss_dir = self.loss_dir(
-                out_dir_preds[batch_pos_binds].reshape(-1, 2),
-                batch_alpha_targets.reshape(-1),
+                out_dir_pos.reshape(-1, 2),
+                batch_bbox3d_targets[..., 6].reshape(-1),
                 # weight=weight_targets,
-                avg_factor=bbox_avg_factor,
+                avg_factor=num_batch_pos,
             )
+            loss_dir_norm = (torch.norm(out_dir_pos.reshape(-1, 2), dim=-1) - 1).abs().mean()  # L2 norm
+            mae_xyz = (decoded_bboxes3d[:, :3] - batch_bbox3d_targets[:, :3]).abs().mean()
+            mae_dim = (decoded_bboxes3d[:, 3:6] - batch_bbox3d_targets[:, 3:6]).abs().mean()
+            mae_roty = loss_dir / torch.pi * 180
             # loss_dir = out_bbox_dist_preds.sum() * 0
-            loss_iou3d_wodir = self.loss_iou3d(
-                decoded_bboxes3d_wodir,
-                batch_bbox3d_targets,
-                # weight=weight_targets,
-                avg_factor=bbox_avg_factor,
-            )
-            # loss_iou3d = out_bbox_dist_preds.sum() * 0
-            loss_iou3d_c3d = self.loss_iou3d(
-                decoded_bboxes3d_c3d,
-                batch_bbox3d_targets,
-                # weight=weight_targets,
-                avg_factor=bbox_avg_factor,
-            )
-            loss_iou3d_depth = self.loss_iou3d(
-                decoded_bboxes3d_depth,
-                batch_bbox3d_targets,
-                # weight=weight_targets,
-                avg_factor=bbox_avg_factor,
-            )
-            loss_iou3d_dim = self.loss_iou3d(
-                decoded_bboxes3d_dim,
-                batch_bbox3d_targets,
-                # weight=weight_targets,
-                avg_factor=bbox_avg_factor,
-            )
-            # loss_iou3d_dir = self.loss_iou3d(
-            #     decoded_bboxes3d_dir,
+            # loss_iou3d_wodir = self.loss_iou3d(
+            #     decoded_bboxes3d_wodir,
             #     batch_bbox3d_targets,
             #     # weight=weight_targets,
             #     avg_factor=bbox_avg_factor,
             # )
-            # loss_iou3d_dir = out_bbox_dist_preds.sum() * 0
+            # # loss_iou3d = out_bbox_dist_preds.sum() * 0
+            # loss_iou3d_c3d = self.loss_iou3d(
+            #     decoded_bboxes3d_c3d,
+            #     batch_bbox3d_targets,
+            #     # weight=weight_targets,
+            #     avg_factor=bbox_avg_factor,
+            # )
+            # loss_iou3d_depth = self.loss_iou3d(
+            #     decoded_bboxes3d_depth,
+            #     batch_bbox3d_targets,
+            #     # weight=weight_targets,
+            #     avg_factor=bbox_avg_factor,
+            # )
+            # loss_iou3d_dim = self.loss_iou3d(
+            #     decoded_bboxes3d_dim,
+            #     batch_bbox3d_targets,
+            #     # weight=weight_targets,
+            #     avg_factor=bbox_avg_factor,
+            # )
         else:
             loss_qfl = self.loss_cls(
-                out_cls_scores, (batch_labels, batch_label_scores), avg_factor=max(num_batch_pos,1)
+                out_cls_scores, (batch_labels, batch_label_scores), avg_factor=max(num_batch_pos, 1)
             )
             loss_bbox = out_bbox_dist_preds.sum() * 0
             loss_dfl = loss_bbox
-            # loss_gc3d = out_bbox_dist_preds.sum() * 0
+            loss_gc3d = loss_bbox
             # loss_offset2c3d = out_bbox_dist_preds.sum() * 0
             loss_dfl_depth = loss_bbox
-            # loss_dim = out_bbox_dist_preds.sum() * 0
+            loss_dim = loss_bbox
             loss_dir = loss_bbox
-            loss_iou3d_wodir = loss_bbox
-            loss_iou3d_c3d = loss_bbox
-            loss_iou3d_depth = loss_bbox
-            loss_iou3d_dim = loss_bbox
+            # loss_iou3d_wodir = loss_bbox
+            # loss_iou3d_c3d = loss_bbox
+            # loss_iou3d_depth = loss_bbox
+            # loss_iou3d_dim = loss_bbox
+            loss_dir_norm = loss_bbox
+            mae_xyz = loss_bbox
+            mae_dim = loss_bbox
+            mae_roty = loss_bbox
             # loss_iou3d_dir = out_bbox_dist_preds.sum() * 0
+
         loss_sum = loss_qfl + loss_bbox + loss_dfl
         loss_states = dict(loss_qfl=loss_qfl, loss_bbox=loss_bbox, loss_dfl=loss_dfl, loss_dfl_depth=loss_dfl_depth,
-                           loss_dir=loss_dir, loss_iou3d_wodir=loss_iou3d_wodir, loss_iou3d_c3d=loss_iou3d_c3d,
-                           loss_iou3d_depth=loss_iou3d_depth, loss_iou3d_dim=loss_iou3d_dim)
+                           loss_dir=loss_dir, loss_dir_norm=loss_dir_norm, loss_gc3d=loss_gc3d, loss_dim=loss_dim,
+                           mae_xyz=mae_xyz, mae_dim=mae_dim, mae_roty=mae_roty)
         # print(self.canon_box_sizes)
         return loss_sum, loss_states

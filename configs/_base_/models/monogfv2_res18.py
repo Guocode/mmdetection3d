@@ -6,13 +6,13 @@ model = dict(
     neck=dict(
         type='DilatedNeck',
         in_channels=[64, 128, 256, 512],
-        out_channels=[64, 64, 64, 64],
+        out_channels=[256, 256, 256, 256],
         norm_cfg=dict(type='BN')),
     bbox_head=dict(
         type='MonoGFocalV2SAICHead',
-        num_classes=3,
-        in_channels=64,
-        feat_channels=64,
+        num_classes=1,
+        in_channels=256,
+        feat_channels=256,
         strides=[4, 8, 16, 32],
         stacked_convs=1,
         loss_cls=dict(
