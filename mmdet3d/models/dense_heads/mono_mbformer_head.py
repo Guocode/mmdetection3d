@@ -19,24 +19,61 @@ INF = 1e8
 EPS = 1e-12
 PI = math.pi
 
+class Mobile2Former(nn.Module):
+    def __init__(self, dim, heads, channel, dropout=0.):
+        super(Mobile2Former, self).__init__()
+        inner_dim = heads * channel
+        self.heads = heads
+        self.to_q = nn.Linear(dim, inner_dim)
+        self.attend = nn.Softmax(dim=-1)
+        self.scale = channel ** -0.5
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, dim),
+            nn.Dropout(dropout)
+        )
 
-class Bias(nn.Module):
-    """A learnable bias parameter.
+    def forward(self, x, z):
+        b, m, d = z.shape
+        b, c, h, w = x.shape
+        x =  x.reshape(b, c, h*w).transpose(1,2).unsqueeze(1)
+        q = self.to_q(z).view(b, self.heads, m, c)
+        dots = q @ x.transpose(2, 3) * self.scale
+        attn = self.attend(dots)
+        out = attn @ x
+        out = rearrange(out, 'b h m c -> b m (h c)')
+        return z + self.to_out(out)
 
-    This layer bias the input by a learnable factor. It adds a
-    learnable bias parameter of shape (1,) with input of any shape.
 
-    Args:
-        bias (float): Initial value of bias. Default: 0.0
-    """
+# inputs: x(b c h w) z(b m d)
+# output: x(b c h w)
+class Former2Mobile(nn.Module):
+    def __init__(self, dim, heads, channel, dropout=0.):
+        super(Former2Mobile, self).__init__()
+        inner_dim = heads * channel
+        self.heads = heads
+        self.to_k = nn.Linear(dim, inner_dim)
+        self.to_v = nn.Linear(dim, inner_dim)
+        self.attend = nn.Softmax(dim=-1)
+        self.scale = channel ** -0.5
 
-    def __init__(self, bias=0.0):
-        super(Bias, self).__init__()
-        self.bias = nn.Parameter(torch.tensor(bias, dtype=torch.float32))
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, channel),
+            nn.Dropout(dropout)
+        )
 
-    def forward(self, x):
-        return x + self.bias
-
+    def forward(self, x, z):
+        b, m, d = z.shape
+        b, c, h, w = x.shape
+        q =  x.reshape(b, c, h*w).transpose(1,2).unsqueeze(1)
+        k = self.to_k(z).view(b, self.heads, m, c)
+        v = self.to_v(z).view(b, self.heads, m, c)
+        dots = q @ k.transpose(2, 3) * self.scale
+        attn = self.attend(dots)
+        out = attn @ v
+        out = rearrange(out, 'b h l c -> b l (h c)')
+        out = self.to_out(out)
+        out = out.view(b, c, h, w)
+        return x + out
 
 class Integral(nn.Module):
     """A fixed layer for calculating integral result from distribution.
@@ -72,7 +109,7 @@ class Integral(nn.Module):
 
 
 @HEADS.register_module()
-class MonoGFocalV2SAICHead(AnchorFreeHead):
+class MonoMBFormerHead(AnchorFreeHead):
     """Generalized Focal Loss V2: Learning Reliable Localization Quality
     Estimation for Dense Object Detection.
     GFocal head structure is similar with GFL head, however GFocal uses
@@ -93,11 +130,7 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
             in QFL setting. Default: 16.
         reg_topk (int): top-k statistics of distribution to guide LQE
         reg_channels (int): hidden layer unit to generate LQE
-    Example:
-        >>> self = MonoGFocalV2SAICHead(11, 7)
-        >>> feats = [torch.rand(1, 7, s, s) for s in [4, 8, 16, 32, 64]]
-        >>> cls_quality_score, bbox_pred = self.forward(feats)
-        >>> assert len(cls_quality_score) == len(self.scales)
+
     """
 
     def __init__(self,
@@ -131,11 +164,10 @@ class MonoGFocalV2SAICHead(AnchorFreeHead):
         self.depth_reg_max = depth_reg_max
         self.depth_max = depth_max
         self.depth_exprg = depth_exprg
-        if add_mean:
-            self.total_dim += 1
+
         print('total dim = ', self.total_dim * 4)
 
-        super(MonoGFocalV2SAICHead, self).__init__(num_classes, in_channels, **kwargs)
+        super(MonoMBFormerHead, self).__init__(num_classes, in_channels, **kwargs)
 
         self.sampling = False
         if self.train_cfg:

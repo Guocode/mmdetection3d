@@ -48,7 +48,7 @@ class UpSample(nn.Module):
 
     def forward(self, x):
         return F.interpolate(x, size=self.size, scale_factor=self.scale_factor,
-                                                mode=self.mode, align_corners=self.align_corner)
+                             mode=self.mode, align_corners=self.align_corner)
 
 
 class ResizeConv(nn.Module):
@@ -79,6 +79,7 @@ class Bottleneck(nn.Module):
 
 class DilateEncoder(nn.Module):
     """ DilateEncoder """
+
     def __init__(self, c1, c2, act='relu', dilation_list=[2, 4, 6, 8]):
         super(DilateEncoder, self).__init__()
         self.projector = nn.Sequential(
@@ -101,11 +102,12 @@ class SPP(nn.Module):
     """
         Spatial Pyramid Pooling
     """
+
     def __init__(self, c1, c2, e=0.5, act='relu'):
         super(SPP, self).__init__()
         c_ = int(c1 * e)
         self.cv1 = Conv(c1, c_, k=1, act=act)
-        self.cv2 = Conv(c_*4, c2, k=1, act=act)
+        self.cv2 = Conv(c_ * 4, c2, k=1, act=act)
 
     def forward(self, x):
         x = self.cv1(x)
@@ -116,6 +118,7 @@ class SPP(nn.Module):
         x = self.cv2(x)
 
         return x
+
 
 @NECKS.register_module()
 class DilatedNeck(BaseModule):
@@ -137,12 +140,14 @@ class DilatedNeck(BaseModule):
     def __init__(self,
                  in_channels=[64, 128, 256, 512],
                  out_channels=[256, 256, 256, 256],
+                 ret_indices=[0, 1, 2, 3],
                  norm_cfg=None,
                  init_cfg=None):
         super(DilatedNeck, self).__init__(init_cfg)
         c2, c3, c4, c5 = in_channels
         p2, p3, p4, p5 = out_channels
-        act='relu'
+        act = 'relu'
+        self.ret_indices = ret_indices
         self.neck = DilateEncoder(c1=c5, c2=p5, act=act)
         # upsample
         self.deconv4 = ResizeConv(c1=p5, c2=p4, act=act, scale_factor=2)  # 32 -> 16
@@ -159,13 +164,20 @@ class DilatedNeck(BaseModule):
 
     def forward(self, x):
         # mlvl_features = [x[i] for i in range(len(x))]
-        c2,c3,c4,c5 = x
+        c2, c3, c4, c5 = x
         p5 = self.neck(c5)
         p4 = self.smooth4(self.latter4(c4) + self.deconv4(p5))
-        p3 = self.smooth3(self.latter3(c3) + self.deconv3(p4))
-        p2 = self.smooth2(self.latter2(c2) + self.deconv2(p3))
+        if 1 in self.ret_indices:
+            p3 = self.smooth3(self.latter3(c3) + self.deconv3(p4))
+        else:
+            p3 = None
+        if 0 in self.ret_indices:
+            p2 = self.smooth2(self.latter2(c2) + self.deconv2(p3))
+        else:
+            p2 = None
+        out = [p2, p3, p4, p5]
+        return tuple(out[i] for i in self.ret_indices)
 
-        return (p2,p3,p4,p5)
     def _get_deconv_cfg(self, deconv_kernel, index):
         if deconv_kernel == 4:
             padding = 1

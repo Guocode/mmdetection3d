@@ -19,15 +19,19 @@ model = dict(
     neck=dict(
         type='DilatedNeck',
         in_channels=[64, 128, 256, 512],
-        out_channels=[1, 1, 128, 128],
-        ret_indices=[2,3],
-        norm_cfg=dict(type='BN')),
+        out_channels=[1, 128, 128, 128],
+        ret_indices=[1,2,3],
+        norm_cfg=dict(type='BN')
+        # norm_cfg=dict(type='GN', num_groups=32),
+        ),
     bbox_head=dict(
-        type='BEVDNDETRMono3DHead',
+        type='BEVEVENDZMono3DHead',
         num_classes=1,
         in_channels=128,
         feat_channels=128,
         stacked_convs=3,
+        norm_cfg=dict(type='BN')
+        # norm_cfg=dict(type='GN', num_groups=32),
     ),
     train_cfg=dict(
         assigner=dict(

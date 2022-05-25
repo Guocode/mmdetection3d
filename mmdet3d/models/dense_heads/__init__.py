@@ -8,6 +8,7 @@ from .bev_detr_mono3d_head import BEVDETRMono3DHead
 from .bev_dndetr_mono3d_head import BEVDNDETRMono3DHead
 from .bev_mono3d_head import BEVMono3DHead
 from .centerpoint_head import CenterHead
+from .deformable_detr3d_head import DeformableDETR3DHead
 from .fcos_mono3d_head import FCOSMono3DHead
 from .free_anchor3d_head import FreeAnchor3DHead
 from .groupfree3d_head import GroupFree3DHead
@@ -24,12 +25,13 @@ from .rtm3d_head import RTM3DHead
 from .densedepth_head import DenseDepthHead
 from .monoconsaic_head import MonoConSAICHead
 from .monogfocalv2saic_head import MonoGFocalV2SAICHead
-
+from .bev_evendz_mono3d_head import BEVEVENDZMono3DHead
 __all__ = [
     'Anchor3DHead', 'FreeAnchor3DHead', 'PartA2RPNHead', 'VoteHead',
     'SSD3DHead', 'BaseConvBboxHead', 'CenterHead', 'ShapeAwareHead',
     'BaseMono3DDenseHead', 'AnchorFreeMono3DHead', 'FCOSMono3DHead',
     'GroupFree3DHead', 'PointRPNHead', 'SMOKEMono3DHead', 'PGDHead',
     'MonoFlexHead', 'MonoConHead', 'MonoConHeadInference', 'RTM3DHead', 'DenseDepthHead', 'MonoConSAICHead',
-    'MonoGFocalV2SAICHead', 'BEVMono3DHead','BEVDETRMono3DHead','BEVDABDETRMono3DHead','BEVDNDETRMono3DHead'
+    'MonoGFocalV2SAICHead', 'BEVMono3DHead','BEVDETRMono3DHead','BEVDABDETRMono3DHead','BEVDNDETRMono3DHead',
+    'BEVEVENDZMono3DHead','DeformableDETR3DHead'
 ]
